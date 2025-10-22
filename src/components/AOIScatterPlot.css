@@ -1,0 +1,88 @@
+.aoi-scatter-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background-color: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  cursor: pointer;
+}
+
+.aoi-scatter-modal {
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  width: 90%;
+  max-width: 900px;
+  height: 700px;
+  display: flex;
+  flex-direction: column;
+  cursor: default;
+  animation: slideIn 0.2s ease-out;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.aoi-scatter-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 20px;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.aoi-scatter-info {
+  flex: 1;
+}
+
+.aoi-scatter-info div {
+  margin-bottom: 4px;
+  color: #333;
+  font-size: 14px;
+}
+
+.aoi-scatter-info div:first-child {
+  font-size: 16px;
+  font-weight: 600;
+  color: #000;
+}
+
+.aoi-scatter-close {
+  background: none;
+  border: none;
+  font-size: 32px;
+  color: #666;
+  cursor: pointer;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: background-color 0.2s;
+}
+
+.aoi-scatter-close:hover {
+  background-color: #f0f0f0;
+  color: #333;
+}
+
+.aoi-scatter-content {
+  flex: 1;
+  padding: 20px;
+  overflow: hidden;
+}

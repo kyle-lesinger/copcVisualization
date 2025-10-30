@@ -59,11 +59,13 @@ export default function AOIScatterPlot({ altitudes, intensities, pointCount, onC
         type: 'linear',
         title: {
           display: true,
-          text: 'Intensity (Backscatter 532nm)',
+          text: 'Intensity (Backscatter 532nm, km⁻¹·sr⁻¹)',
           font: {
             size: 14
           }
-        }
+        },
+        min: 0,
+        max: 3.5
       },
       y: {
         type: 'linear',
@@ -95,8 +97,8 @@ export default function AOIScatterPlot({ altitudes, intensities, pointCount, onC
         callbacks: {
           label: function(context: any) {
             const alt = context.parsed.y.toFixed(2)
-            const intensity = context.parsed.x.toFixed(0)
-            return `Alt: ${alt} km, Intensity: ${intensity}`
+            const intensity = context.parsed.x.toFixed(3)
+            return `Alt: ${alt} km, Intensity: ${intensity} km⁻¹·sr⁻¹`
           }
         }
       }

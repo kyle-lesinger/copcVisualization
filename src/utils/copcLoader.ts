@@ -433,37 +433,70 @@ export function computeElevationColors(
 
 /**
  * Compute colors for points based on intensity
+ *
+ * @param useCalipsoScaling - If true, converts LAS intensity values back to physical units
+ *                            using CALIPSO encoding: physical = (intensity / 10000) - 0.1
+ *                            Then normalizes using physical min/max (default: 0 to 3.5 km⁻¹·sr⁻¹)
  */
 export function computeIntensityColors(
   intensities: Uint16Array,
   colors: Uint8Array,
   minIntensity?: number,
   maxIntensity?: number,
-  colormap: Colormap = 'viridis'
+  colormap: Colormap = 'viridis',
+  useCalipsoScaling: boolean = true
 ) {
   const count = intensities.length
 
-  // Use provided min/max or compute from data
-  if (minIntensity === undefined || maxIntensity === undefined) {
-    minIntensity = Infinity
-    maxIntensity = -Infinity
+  // For CALIPSO data, use physical units (km⁻¹·sr⁻¹)
+  // LAS encoding: intensity = (physical + 0.1) * 10000
+  // Physical decoding: physical = (intensity / 10000) - 0.1
+  if (useCalipsoScaling) {
+    // Use scientific valid range for CALIPSO backscatter if not specified
+    // 532nm valid range: -0.1 to 3.3, we use 0 to 3.5 for normalization
+    const physicalMin = minIntensity !== undefined ? minIntensity : 0.0
+    const physicalMax = maxIntensity !== undefined ? maxIntensity : 3.5
+    const range = physicalMax - physicalMin
+
     for (let i = 0; i < count; i++) {
-      minIntensity = Math.min(minIntensity, intensities[i])
-      maxIntensity = Math.max(maxIntensity, intensities[i])
+      const lasIntensity = intensities[i]
+
+      // Convert LAS intensity back to physical units
+      const physical = (lasIntensity / 10000.0) - 0.1
+
+      // Normalize to 0-1 range using physical units
+      const normalized = range > 0 ? Math.max(0, Math.min(1, (physical - physicalMin) / range)) : 0.5
+
+      const [r, g, b] = applyColormap(normalized, colormap)
+
+      colors[i * 3] = r
+      colors[i * 3 + 1] = g
+      colors[i * 3 + 2] = b
     }
-  }
+  } else {
+    // Standard mode: use raw intensity values
+    // Use provided min/max or compute from data
+    if (minIntensity === undefined || maxIntensity === undefined) {
+      minIntensity = Infinity
+      maxIntensity = -Infinity
+      for (let i = 0; i < count; i++) {
+        minIntensity = Math.min(minIntensity, intensities[i])
+        maxIntensity = Math.max(maxIntensity, intensities[i])
+      }
+    }
 
-  const range = maxIntensity - minIntensity
+    const range = maxIntensity - minIntensity
 
-  for (let i = 0; i < count; i++) {
-    const intensity = intensities[i]
-    const normalized = range > 0 ? (intensity - minIntensity) / range : 0.5
+    for (let i = 0; i < count; i++) {
+      const intensity = intensities[i]
+      const normalized = range > 0 ? (intensity - minIntensity) / range : 0.5
 
-    const [r, g, b] = applyColormap(normalized, colormap)
+      const [r, g, b] = applyColormap(normalized, colormap)
 
-    colors[i * 3] = r
-    colors[i * 3 + 1] = g
-    colors[i * 3 + 2] = b
+      colors[i * 3] = r
+      colors[i * 3 + 1] = g
+      colors[i * 3 + 2] = b
+    }
   }
 }
 

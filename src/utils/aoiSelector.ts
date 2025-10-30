@@ -48,9 +48,9 @@ export function isPointInPolygon(point: LatLon, polygon: LatLon[]): boolean {
 /**
  * Filter point cloud data by AOI polygon
  * @param positions Float32Array of positions [x, y, z, x, y, z, ...]
- * @param intensities Uint16Array of intensity values
+ * @param intensities Uint16Array of intensity values (LAS encoded)
  * @param polygon AOI polygon vertices
- * @returns Filtered data with altitudes and intensities
+ * @returns Filtered data with altitudes and intensities (in physical units: km⁻¹·sr⁻¹)
  */
 export function filterDataByAOI(
   positions: Float32Array,
@@ -71,7 +71,13 @@ export function filterDataByAOI(
 
     if (isPointInPolygon(point, polygon)) {
       altitudes.push(alt)
-      filteredIntensities.push(intensities[i])
+
+      // Convert LAS intensity to physical units (km⁻¹·sr⁻¹)
+      // CALIPSO encoding: intensity = (physical + 0.1) * 10000
+      // Physical decoding: physical = (intensity / 10000) - 0.1
+      const lasIntensity = intensities[i]
+      const physicalIntensity = (lasIntensity / 10000.0) - 0.1
+      filteredIntensities.push(physicalIntensity)
     }
   }
 

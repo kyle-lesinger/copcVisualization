@@ -16,22 +16,33 @@ import sys
 
 def get_calipso_altitudes(n_bins=583):
     """
-    Generate standard CALIPSO Level 1 altitude array.
+    Generate CALIPSO Level 1 altitude array.
 
-    CALIPSO L1 data uses 583 altitude bins from -0.5 km to 40 km
-    with 30m vertical resolution for most bins.
+    CALIPSO Level 1B data uses 583 altitude bins spanning -2.0 to 40.0 km
+    with variable vertical resolution across 5 altitude regions:
+    - Region 1: -2.0 to -0.5 km (300m resolution, 5 bins)
+    - Region 2: -0.5 to 8.3 km (30m resolution, 290 bins) - Troposphere
+    - Region 3: 8.3 to 20.2 km (60m resolution, 200 bins) - Upper Trop/Lower Strat
+    - Region 4: 20.2 to 30.1 km (180m resolution, 55 bins) - Stratosphere
+    - Region 5: 30.1 to 40.0 km (300m resolution, 33 bins) - Upper Stratosphere
+
+    Note: This implementation uses a linear approximation for simplicity.
+    For precise altitude values, consider implementing the actual variable-resolution
+    CALIPSO altitude grid as documented in CALIPSO DPC Rev 5.00.
 
     Args:
         n_bins: Number of altitude bins (default 583)
 
     Returns:
         1D numpy array of altitudes in km
+
+    References:
+        CALIPSO Data Products Catalog, NASA LaRC ASDC
+        https://www-calipso.larc.nasa.gov/resources/calipso_users_guide/
     """
-    # CALIPSO standard altitude bins
-    # From -0.5 to 30.1 km with 30m (0.03 km) spacing = 1021 bins
-    # But actual data uses 583 bins from -0.5 to 40 km
-    # According to CALIPSO DPC: altitude ranges from -0.5 to ~40 km
-    altitudes = np.linspace(-0.5, 40, n_bins)
+    # Linear approximation of CALIPSO altitude grid
+    # Corrected to match official range: -2.0 to 40.0 km (was -0.5 to 40.0)
+    altitudes = np.linspace(-2.0, 40.0, n_bins)
     return altitudes
 
 
@@ -138,12 +149,13 @@ def create_point_cloud(data):
     bs_1064 = backscatter_1064.flatten()
 
     # Mask invalid values
-    # CALIPSO uses -9999 for missing data and has valid ranges:
+    # CALIPSO uses -9999 for missing data and has valid ranges per documentation:
     # 532nm: -0.1 to 3.3 (1/(km·sr))
     # 1064nm: -0.04 to 2.5 (1/(km·sr))
+    # Apply filters with small margins to exclude noisy/saturated measurements
     valid_mask = (
-        (bs_532 > -1.0) & (bs_532 < 10.0) &  # Filter extreme values
-        (bs_1064 > -1.0) & (bs_1064 < 10.0) &
+        (bs_532 > -0.2) & (bs_532 < 3.5) &  # CALIPSO valid range: -0.1 to 3.3 (with margin)
+        (bs_1064 > -0.1) & (bs_1064 < 2.6) &  # CALIPSO valid range: -0.04 to 2.5 (with margin)
         np.isfinite(bs_532) & np.isfinite(bs_1064)
     )
 

@@ -143,8 +143,8 @@ export default function ControlPanel({
         )}
         {dataRange.intensity && (
           <p>
-            <strong>Intensity:</strong><br />
-            {dataRange.intensity[0].toFixed(0)} to {dataRange.intensity[1].toFixed(0)}
+            <strong>Intensity (532nm):</strong><br />
+            {dataRange.intensity[0].toFixed(3)} to {dataRange.intensity[1].toFixed(3)} km⁻¹·sr⁻¹
           </p>
         )}
         {!dataRange.elevation && !dataRange.intensity && (

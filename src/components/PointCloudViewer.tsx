@@ -116,8 +116,8 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
         // Compute global ranges across all files
         let minElev = Infinity
         let maxElev = -Infinity
-        let minInt = Infinity
-        let maxInt = -Infinity
+        let minIntPhysical = Infinity
+        let maxIntPhysical = -Infinity
 
         allData.forEach((data) => {
           // Elevation range from positions (Z coordinate = altitude in km)
@@ -127,16 +127,20 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
             maxElev = Math.max(maxElev, alt)
           }
 
-          // Intensity range
+          // Intensity range - convert from LAS encoding to physical units
+          // CALIPSO encoding: intensity = (physical + 0.1) * 10000
+          // Physical units: km⁻¹·sr⁻¹
           for (let i = 0; i < data.intensities.length; i++) {
-            minInt = Math.min(minInt, data.intensities[i])
-            maxInt = Math.max(maxInt, data.intensities[i])
+            const lasIntensity = data.intensities[i]
+            const physical = (lasIntensity / 10000.0) - 0.1
+            minIntPhysical = Math.min(minIntPhysical, physical)
+            maxIntPhysical = Math.max(maxIntPhysical, physical)
           }
         })
 
         const ranges = {
           elevation: [minElev, maxElev] as [number, number],
-          intensity: [minInt, maxInt] as [number, number]
+          intensity: [minIntPhysical, maxIntPhysical] as [number, number]
         }
         setGlobalRanges(ranges)
         onDataRangeUpdate(ranges)
@@ -213,12 +217,15 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
           )
           break
         case 'intensity':
+          // Use physical units for CALIPSO backscatter (km⁻¹·sr⁻¹)
+          // Valid range: 0 to 3.5
           computeIntensityColors(
             data.intensities,
             colors,
-            globalRanges.intensity![0],
-            globalRanges.intensity![1],
-            colormap
+            0.0,  // Physical min (km⁻¹·sr⁻¹)
+            3.5,  // Physical max (km⁻¹·sr⁻¹)
+            colormap,
+            true  // Enable CALIPSO scaling
           )
           break
         case 'classification':

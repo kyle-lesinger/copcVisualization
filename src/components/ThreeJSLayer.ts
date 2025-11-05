@@ -112,6 +112,7 @@ export class ThreeJSLayer implements maplibregl.CustomLayerInterface {
     // Create point clouds for each data file
     this.options.data.forEach((data, dataIndex) => {
       const positions: number[] = []
+      const colors: number[] = []
 
       console.log(`[ThreeJSLayer] Processing data file ${dataIndex}, points: ${data.positions.length / 3}`)
 
@@ -138,14 +139,23 @@ export class ThreeJSLayer implements maplibregl.CustomLayerInterface {
         const relZ = (merc.z || 0) - (centerMerc.z || 0)
 
         positions.push(relX, relY, relZ)
+
+        // Also subsample the colors to match the subsampled positions
+        const colorIndex = i // same index as position (i is already in groups of 3)
+        colors.push(
+          data.colors[colorIndex] / 255,     // R (normalize to 0-1)
+          data.colors[colorIndex + 1] / 255, // G (normalize to 0-1)
+          data.colors[colorIndex + 2] / 255  // B (normalize to 0-1)
+        )
       }
 
       console.log(`[ThreeJSLayer] Sample relative Mercator positions:`, positions.slice(0, 9))
+      console.log(`[ThreeJSLayer] Sample colors:`, colors.slice(0, 9))
 
       // Create Three.js geometry
       const geometry = new THREE.BufferGeometry()
       geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-      geometry.setAttribute('color', new THREE.BufferAttribute(data.colors, 3, true))
+      geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
       geometry.computeBoundingBox()
 
       console.log(`[ThreeJSLayer] Bounding box:`, geometry.boundingBox)

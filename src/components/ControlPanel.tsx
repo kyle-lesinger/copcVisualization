@@ -1,6 +1,7 @@
-import { ColorMode, Colormap, DataRange, ViewMode } from '../App'
+import { ColorMode, Colormap, DataRange, ViewMode, HeightFilter } from '../App'
 import { getColormapName } from '../utils/colormaps'
 import { formatTaiTime } from '../utils/copcLoader'
+import HeightFilterPanel from './HeightFilterPanel'
 import './ControlPanel.css'
 
 interface ControlPanelProps {
@@ -13,6 +14,10 @@ interface ControlPanelProps {
   viewMode: ViewMode
   onViewModeChange: (mode: ViewMode) => void
   dataRange: DataRange
+  // Height filter controls
+  heightFilter: HeightFilter
+  onHeightFilterChange: (updates: Partial<HeightFilter>) => void
+  onResetHeightFilter: () => void
   // AOI controls
   isDrawingAOI: boolean
   onToggleDrawAOI: () => void
@@ -39,6 +44,9 @@ export default function ControlPanel({
   viewMode,
   onViewModeChange,
   dataRange,
+  heightFilter,
+  onHeightFilterChange,
+  onResetHeightFilter,
   isDrawingAOI,
   onToggleDrawAOI,
   onClearAOI,
@@ -101,6 +109,17 @@ export default function ControlPanel({
         />
       </div>
 
+      <HeightFilterPanel
+        minHeight={heightFilter.min}
+        maxHeight={heightFilter.max}
+        absoluteMin={dataRange.elevation ? dataRange.elevation[0] : 0}
+        absoluteMax={dataRange.elevation ? dataRange.elevation[1] : 40}
+        onApply={(min, max) => onHeightFilterChange({ min, max })}
+        onReset={onResetHeightFilter}
+        enabled={heightFilter.enabled}
+        onToggleEnabled={() => onHeightFilterChange({ enabled: !heightFilter.enabled })}
+      />
+
       <div className="control-group">
         <label className="control-label">View Mode</label>
         <button
@@ -112,16 +131,6 @@ export default function ControlPanel({
         >
           {viewMode === 'space' ? '🗺️ 2D Map' : '🌍 Space View'}
         </button>
-      </div>
-
-      <div className="control-info">
-        <h4>Controls:</h4>
-        <ul>
-          <li><kbd>Left Mouse</kbd> - Rotate</li>
-          <li><kbd>Right Mouse</kbd> - Pan</li>
-          <li><kbd>Scroll</kbd> - Zoom</li>
-          <li><kbd>R</kbd> - Reset Camera</li>
-        </ul>
       </div>
 
       <div className="data-info">

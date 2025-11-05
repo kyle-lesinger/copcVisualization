@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import PointCloudViewer from './components/PointCloudViewer'
 import FileSelector from './components/FileSelector'
 import ControlPanel from './components/ControlPanel'
+import ControlsInfo from './components/ControlsInfo'
 import { Colormap } from './utils/colormaps'
 import { LatLon } from './utils/aoiSelector'
 import './App.css'
@@ -31,6 +32,12 @@ export interface DataRange {
   intensity: [number, number] | null
 }
 
+export interface HeightFilter {
+  enabled: boolean
+  min: number
+  max: number
+}
+
 function App() {
   const [fileMode, setFileMode] = useState<FileMode>('tiled')
   const [selectedFiles, setSelectedFiles] = useState<string[]>(fileMode === 'single' ? [SINGLE_FILES[0]] : TILED_FILES)
@@ -41,6 +48,13 @@ function App() {
   const [dataRange, setDataRange] = useState<DataRange>({
     elevation: null,
     intensity: null
+  })
+
+  // Height filter state
+  const [heightFilter, setHeightFilter] = useState<HeightFilter>({
+    enabled: false,
+    min: 0,
+    max: 40
   })
 
   // AOI state
@@ -56,6 +70,9 @@ function App() {
   const [currentGpsTime, setCurrentGpsTime] = useState<number | null>(null)
   const [currentPosition, setCurrentPosition] = useState<{ lat: number, lon: number } | null>(null)
   const [animateSatelliteTrigger, setAnimateSatelliteTrigger] = useState(false)
+
+  // Track if height filter has been initialized to prevent overwriting user changes
+  const [heightFilterInitialized, setHeightFilterInitialized] = useState(false)
 
   const handleFileModeChange = (mode: FileMode) => {
     setFileMode(mode)
@@ -108,6 +125,30 @@ function App() {
     setCurrentPosition({ lat, lon })
   }
 
+  const handleHeightFilterChange = (updates: Partial<HeightFilter>) => {
+    setHeightFilter(prev => ({ ...prev, ...updates }))
+  }
+
+  const handleResetHeightFilter = () => {
+    setHeightFilter(prev => ({
+      ...prev,
+      min: dataRange.elevation ? dataRange.elevation[0] : 0,
+      max: dataRange.elevation ? dataRange.elevation[1] : 40
+    }))
+  }
+
+  // Update height filter range when data loads (only on initial load)
+  useEffect(() => {
+    if (dataRange.elevation && !heightFilterInitialized) {
+      setHeightFilter(prev => ({
+        ...prev,
+        min: dataRange.elevation![0],
+        max: dataRange.elevation![1]
+      }))
+      setHeightFilterInitialized(true)
+    }
+  }, [dataRange.elevation, heightFilterInitialized])
+
   return (
     <div className="app">
       <PointCloudViewer
@@ -127,6 +168,7 @@ function App() {
         onLastPointUpdate={setLastPoint}
         onCurrentGpsTimeUpdate={handleCurrentGpsTimeUpdate}
         onCurrentPositionUpdate={handleCurrentPositionUpdate}
+        heightFilter={heightFilter}
       />
 
       <FileSelector
@@ -148,6 +190,9 @@ function App() {
         viewMode={viewMode}
         onViewModeChange={setViewMode}
         dataRange={dataRange}
+        heightFilter={heightFilter}
+        onHeightFilterChange={handleHeightFilterChange}
+        onResetHeightFilter={handleResetHeightFilter}
         isDrawingAOI={isDrawingAOI}
         onToggleDrawAOI={handleToggleDrawAOI}
         onClearAOI={handleClearAOI}
@@ -161,6 +206,8 @@ function App() {
         currentPosition={currentPosition}
         onAnimateSatellite={handleAnimateSatellite}
       />
+
+      <ControlsInfo />
     </div>
   )
 }

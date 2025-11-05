@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import * as THREE from 'three'
-import { ColorMode, Colormap, DataRange, ViewMode } from '../App'
+import { ColorMode, Colormap, DataRange, ViewMode, HeightFilter } from '../App'
 import {
   loadCOPCFile,
   PointCloudData,
@@ -32,9 +32,10 @@ interface PointCloudViewerProps {
   onLastPointUpdate?: (lastPoint: { lon: number, lat: number, alt: number, gpsTime: number } | null) => void
   onCurrentGpsTimeUpdate?: (gpsTime: number | null) => void
   onCurrentPositionUpdate?: (lat: number, lon: number) => void
+  heightFilter?: HeightFilter
 }
 
-export default function PointCloudViewer({ files, colorMode, colormap, pointSize, viewMode, onDataRangeUpdate, aoiPolygon, showScatterPlotTrigger, onAOIDataReady, onPolygonUpdate, isDrawingAOI, onAnimateSatelliteTrigger, onFirstPointUpdate, onLastPointUpdate, onCurrentGpsTimeUpdate, onCurrentPositionUpdate }: PointCloudViewerProps) {
+export default function PointCloudViewer({ files, colorMode, colormap, pointSize, viewMode, onDataRangeUpdate, aoiPolygon, showScatterPlotTrigger, onAOIDataReady, onPolygonUpdate, isDrawingAOI, onAnimateSatelliteTrigger, onFirstPointUpdate, onLastPointUpdate, onCurrentGpsTimeUpdate, onCurrentPositionUpdate, heightFilter }: PointCloudViewerProps) {
   const globeRef = useRef<GlobeViewerHandle>(null)
   const deckMapRef = useRef<DeckGLMapViewHandle>(null)
   const pointCloudsRef = useRef<THREE.Points[]>([])
@@ -45,6 +46,13 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
   const [error, setError] = useState<string | null>(null)
   const [stats, setStats] = useState({ points: 0, files: 0 })
   const [globalRanges, setGlobalRanges] = useState<{
+    elevation: [number, number] | null
+    intensity: [number, number] | null
+  }>({
+    elevation: null,
+    intensity: null
+  })
+  const [filteredRanges, setFilteredRanges] = useState<{
     elevation: [number, number] | null
     intensity: [number, number] | null
   }>({
@@ -63,6 +71,129 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
   const [firstPoint, setFirstPoint] = useState<{ lon: number, lat: number, alt: number, gpsTime: number } | null>(null)
   const [lastPoint, setLastPoint] = useState<{ lon: number, lat: number, alt: number, gpsTime: number } | null>(null)
   const [animationProgress, setAnimationProgress] = useState(1) // Start at 1 to show all points initially
+
+  // Helper function to filter points by height
+  const filterPointsByHeight = useCallback((data: PointCloudData): PointCloudData => {
+    // If height filter is disabled, return original data
+    if (!heightFilter || !heightFilter.enabled) {
+      return data
+    }
+
+    const { min, max } = heightFilter
+    const filteredIndices: number[] = []
+
+    // Find all points within height range
+    for (let i = 0; i < data.positions.length; i += 3) {
+      const altitude = data.positions[i + 2] // Z coordinate = altitude in km
+      if (altitude >= min && altitude <= max) {
+        filteredIndices.push(i / 3) // Store point index (not position index)
+      }
+    }
+
+    // If no points pass the filter, return empty arrays
+    if (filteredIndices.length === 0) {
+      return {
+        ...data,
+        positions: new Float32Array(0),
+        colors: new Uint8Array(0),
+        intensities: new Uint16Array(0),
+        classifications: new Uint8Array(0),
+        count: 0
+      }
+    }
+
+    // Create filtered arrays
+    const filteredPositions = new Float32Array(filteredIndices.length * 3)
+    const filteredColors = new Uint8Array(filteredIndices.length * 3)
+    const filteredIntensities = new Uint16Array(filteredIndices.length)
+    const filteredClassifications = new Uint8Array(filteredIndices.length)
+
+    filteredIndices.forEach((pointIndex, newIndex) => {
+      // Copy position (3 values per point)
+      filteredPositions[newIndex * 3] = data.positions[pointIndex * 3]
+      filteredPositions[newIndex * 3 + 1] = data.positions[pointIndex * 3 + 1]
+      filteredPositions[newIndex * 3 + 2] = data.positions[pointIndex * 3 + 2]
+
+      // Copy color (3 values per point)
+      filteredColors[newIndex * 3] = data.colors[pointIndex * 3]
+      filteredColors[newIndex * 3 + 1] = data.colors[pointIndex * 3 + 1]
+      filteredColors[newIndex * 3 + 2] = data.colors[pointIndex * 3 + 2]
+
+      // Copy intensity (1 value per point)
+      filteredIntensities[newIndex] = data.intensities[pointIndex]
+
+      // Copy classification (1 value per point)
+      filteredClassifications[newIndex] = data.classifications[pointIndex]
+    })
+
+    return {
+      ...data,
+      positions: filteredPositions,
+      colors: filteredColors,
+      intensities: filteredIntensities,
+      classifications: filteredClassifications,
+      count: filteredIndices.length
+    }
+  }, [heightFilter])
+
+  // Memoized filtered data for 2D map view
+  // Uses dataVersion as dependency since dataRef.current changes don't trigger re-renders
+  const filteredDataForMap = useMemo(() => {
+    return dataRef.current.map(data => filterPointsByHeight(data))
+  }, [dataVersion, heightFilter, filterPointsByHeight])
+
+  // Function to compute ranges from filtered data
+  const computeFilteredRanges = useCallback(() => {
+    if (!heightFilter || !heightFilter.enabled || dataRef.current.length === 0) {
+      // If filter is off, use global ranges
+      setFilteredRanges(globalRanges)
+      onDataRangeUpdate(globalRanges)
+      return
+    }
+
+    // Calculate ranges from filtered data only
+    let minElev = Infinity
+    let maxElev = -Infinity
+    let minIntPhysical = Infinity
+    let maxIntPhysical = -Infinity
+
+    dataRef.current.forEach((data) => {
+      const filtered = filterPointsByHeight(data)
+
+      // Elevation range from filtered positions
+      for (let i = 0; i < filtered.positions.length; i += 3) {
+        const alt = filtered.positions[i + 2]
+        minElev = Math.min(minElev, alt)
+        maxElev = Math.max(maxElev, alt)
+      }
+
+      // Intensity range from filtered intensities
+      for (let i = 0; i < filtered.intensities.length; i++) {
+        const lasIntensity = filtered.intensities[i]
+        const physical = (lasIntensity / 10000.0) - 0.1
+        minIntPhysical = Math.min(minIntPhysical, physical)
+        maxIntPhysical = Math.max(maxIntPhysical, physical)
+      }
+    })
+
+    // Handle case where no points pass the filter
+    if (minElev === Infinity || maxElev === -Infinity) {
+      const ranges = {
+        elevation: heightFilter ? [heightFilter.min, heightFilter.max] as [number, number] : null,
+        intensity: null
+      }
+      setFilteredRanges(ranges)
+      onDataRangeUpdate(ranges)
+      return
+    }
+
+    const ranges = {
+      elevation: [minElev, maxElev] as [number, number],
+      intensity: [minIntPhysical, maxIntPhysical] as [number, number]
+    }
+    setFilteredRanges(ranges)
+    onDataRangeUpdate(ranges)
+  }, [heightFilter, filterPointsByHeight, globalRanges, onDataRangeUpdate])
 
   // Globe viewer is initialized by the GlobeViewer component
 
@@ -143,6 +274,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
           intensity: [minIntPhysical, maxIntPhysical] as [number, number]
         }
         setGlobalRanges(ranges)
+        setFilteredRanges(ranges) // Initially, filtered ranges = global ranges
         onDataRangeUpdate(ranges)
 
         // Calculate map center from first file's data
@@ -163,13 +295,16 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
         // Create point clouds for each file
         let totalPoints = 0
         allData.forEach((data) => {
+          // Apply height filter before creating geometry
+          const filteredData = filterPointsByHeight(data)
+
           // Convert lat/lon/alt coordinates to 3D globe coordinates
           // Note: LAZ file has X=lon, Y=lat, Z=alt (in km)
-          const globePositions = convertPointsToGlobe(data.positions)
+          const globePositions = convertPointsToGlobe(filteredData.positions)
 
           const geometry = new THREE.BufferGeometry()
           geometry.setAttribute('position', new THREE.BufferAttribute(globePositions, 3))
-          geometry.setAttribute('color', new THREE.BufferAttribute(data.colors, 3, true))
+          geometry.setAttribute('color', new THREE.BufferAttribute(filteredData.colors, 3, true))
 
           const material = new THREE.PointsMaterial({
             size: pointSize * 0.002, // Scale for globe view
@@ -183,7 +318,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
           scene.add(points)
           pointCloudsRef.current.push(points)
 
-          totalPoints += data.count
+          totalPoints += filteredData.count
         })
 
         setStats({ points: totalPoints, files: allData.length })
@@ -197,39 +332,99 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
         setError(err.message || 'Failed to load COPC files')
         setLoading(false)
       })
-  }, [files, pointSize, onDataRangeUpdate])
+  }, [files, pointSize, onDataRangeUpdate, filterPointsByHeight])
+
+  // Rebuild point clouds when height filter changes
+  useEffect(() => {
+    if (!globeRef.current || dataRef.current.length === 0 || viewMode === '2d') return
+
+    const scene = globeRef.current.getScene()
+    if (!scene) return
+
+    // Remove existing point clouds
+    pointCloudsRef.current.forEach(pc => {
+      scene.remove(pc)
+      pc.geometry.dispose()
+      if (pc.material instanceof THREE.Material) {
+        pc.material.dispose()
+      }
+    })
+    pointCloudsRef.current = []
+
+    // Recreate point clouds with filtered data
+    let totalPoints = 0
+    dataRef.current.forEach((data) => {
+      // Apply height filter
+      const filteredData = filterPointsByHeight(data)
+
+      // Convert to globe coordinates
+      const globePositions = convertPointsToGlobe(filteredData.positions)
+
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.BufferAttribute(globePositions, 3))
+      geometry.setAttribute('color', new THREE.BufferAttribute(filteredData.colors, 3, true))
+
+      const material = new THREE.PointsMaterial({
+        size: pointSize * 0.002,
+        vertexColors: true,
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.8
+      })
+
+      const points = new THREE.Points(geometry, material)
+      scene.add(points)
+      pointCloudsRef.current.push(points)
+
+      totalPoints += filteredData.count
+    })
+
+    setStats(prev => ({ ...prev, points: totalPoints }))
+
+    // Compute filtered ranges for display and coloring
+    computeFilteredRanges()
+
+    // Increment dataVersion to trigger DeckGLMapView update
+    setDataVersion(prev => prev + 1)
+  }, [heightFilter, filterPointsByHeight, pointSize, viewMode, computeFilteredRanges])
 
   // Update colors when color mode or colormap changes
   useEffect(() => {
     if (!globalRanges.elevation || !globalRanges.intensity) return
 
+    // Use filtered ranges if height filter is enabled, otherwise use global ranges
+    const activeRanges = (heightFilter?.enabled && filteredRanges.elevation && filteredRanges.intensity)
+      ? filteredRanges
+      : globalRanges
+
     dataRef.current.forEach((data, index) => {
-      const colors = data.colors
+      // Apply height filter first
+      const filteredData = filterPointsByHeight(data)
+      const colors = filteredData.colors
 
       switch (colorMode) {
         case 'elevation':
           computeElevationColors(
-            data.positions,
+            filteredData.positions,
             colors,
-            globalRanges.elevation![0],
-            globalRanges.elevation![1],
+            activeRanges.elevation![0],
+            activeRanges.elevation![1],
             colormap
           )
           break
         case 'intensity':
-          // Use physical units for CALIPSO backscatter (km⁻¹·sr⁻¹)
-          // Valid range: 0 to 3.5
+          // Use filtered intensity range for better color mapping
           computeIntensityColors(
-            data.intensities,
+            filteredData.intensities,
             colors,
-            0.0,  // Physical min (km⁻¹·sr⁻¹)
-            3.5,  // Physical max (km⁻¹·sr⁻¹)
+            activeRanges.intensity![0],
+            activeRanges.intensity![1],
             colormap,
             true  // Enable CALIPSO scaling
           )
           break
         case 'classification':
-          computeClassificationColors(data.classifications, colors)
+          computeClassificationColors(filteredData.classifications, colors)
           break
       }
 
@@ -244,7 +439,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
 
     // Increment dataVersion to notify DeckGLMapView that colors have changed
     setDataVersion(prev => prev + 1)
-  }, [colorMode, colormap, globalRanges])
+  }, [colorMode, colormap, globalRanges, filteredRanges, heightFilter, filterPointsByHeight])
 
   // Update point size for globe view (2D handled by DeckGLMapView props)
   useEffect(() => {
@@ -299,7 +494,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
     onCurrentPositionUpdate?.(lat, lon)
   }, [onCurrentPositionUpdate])
 
-  // Filter data when AOI polygon changes
+  // Filter data when AOI polygon changes or height filter changes
   useEffect(() => {
     if (!aoiPolygon || aoiPolygon.length < 3) {
       setAoiData(null)
@@ -307,12 +502,16 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
       return
     }
 
-    // Filter all loaded data by the polygon
+    // Filter all loaded data by the polygon and height filter
     let allAltitudes: number[] = []
     let allIntensities: number[] = []
 
     dataRef.current.forEach(data => {
-      const filtered = filterDataByAOI(data.positions, data.intensities, aoiPolygon)
+      // First apply height filter if enabled
+      const heightFilteredData = filterPointsByHeight(data)
+
+      // Then apply AOI polygon filter to the height-filtered data
+      const filtered = filterDataByAOI(heightFilteredData.positions, heightFilteredData.intensities, aoiPolygon)
       allAltitudes = [...allAltitudes, ...filtered.altitudes]
       allIntensities = [...allIntensities, ...filtered.intensities]
     })
@@ -321,7 +520,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
     const pointCount = allAltitudes.length
     setAoiData(hasData ? { altitudes: allAltitudes, intensities: allIntensities } : null)
     onAOIDataReady?.(hasData, pointCount)
-  }, [aoiPolygon, onAOIDataReady])
+  }, [aoiPolygon, onAOIDataReady, heightFilter, filterPointsByHeight])
 
   // Show scatter plot when triggered from parent
   useEffect(() => {
@@ -354,15 +553,18 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
         scene.add(pointCloud)
       }
 
+      // Apply height filter
+      const filteredData = filterPointsByHeight(data)
+
       // Convert coordinates to globe view
-      const positions = convertPointsToGlobe(data.positions)
+      const positions = convertPointsToGlobe(filteredData.positions)
 
       // Update the geometry
       const positionAttribute = pointCloud.geometry.getAttribute('position') as THREE.BufferAttribute
       positionAttribute.array = positions
       positionAttribute.needsUpdate = true
     })
-  }, [viewMode])
+  }, [viewMode, filterPointsByHeight])
 
   // Notify parent when first point is loaded
   useEffect(() => {
@@ -412,7 +614,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
           ref={deckMapRef}
           center={mapCenter}
           zoom={5}
-          data={dataRef.current}
+          data={filteredDataForMap}
           colorMode={colorMode}
           colormap={colormap}
           pointSize={pointSize}

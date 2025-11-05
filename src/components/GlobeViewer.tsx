@@ -15,6 +15,8 @@ export interface GlobeViewerHandle {
   setDrawingMode: (enabled: boolean) => void
   setViewMode: (mode: 'space' | '2d') => void
   animateSatelliteToFirstPoint: (firstPoint: { lon: number, lat: number, alt: number, gpsTime: number }, lastPoint: { lon: number, lat: number, alt: number, gpsTime: number }, positions?: Float32Array) => void
+  getCameraState: () => { distance: number, target: { lon: number, lat: number } } | null
+  setCameraState: (distance: number, target: { lon: number, lat: number }) => void
 }
 
 interface GlobeViewerProps {
@@ -23,10 +25,11 @@ interface GlobeViewerProps {
   onAnimationProgress?: (progress: number) => void
   onCurrentGpsTime?: (gpsTime: number) => void
   onCurrentPosition?: (lat: number, lon: number) => void
+  initialCameraState?: { distance: number, target: { lon: number, lat: number } }
 }
 
 const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref) => {
-  const { onClick, onPolygonComplete, onAnimationProgress, onCurrentGpsTime, onCurrentPosition } = props
+  const { onClick, onPolygonComplete, onAnimationProgress, onCurrentGpsTime, onCurrentPosition, initialCameraState } = props
   const containerRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null)
@@ -193,9 +196,8 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
           satelliteRef.current.visible = false
         }
       } else {
-        // Space view: default position
-        camera.position.set(0, 0, 3)
-        controls.target.set(0, 0, 0)
+        // Space view: restore visibility without changing camera position
+        // (camera position is set during initialization or preserved from previous state)
         // Restore globe opacity and visibility
         if (globe.material instanceof THREE.MeshPhongMaterial) {
           globe.material.opacity = 0.95
@@ -301,8 +303,40 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       }
 
       animate()
+    },
+    getCameraState: () => {
+      if (!cameraRef.current || !controlsRef.current) return null
+
+      const camera = cameraRef.current
+      const controls = controlsRef.current
+      const distance = camera.position.length()
+
+      // Get the target (where camera is looking at) and convert to lat/lon
+      const target = controls.target.clone().normalize()
+      const targetLatLon = point3DToLatLon(target)
+
+      return {
+        distance,
+        target: { lon: targetLatLon.lon, lat: targetLatLon.lat }
+      }
+    },
+    setCameraState: (distance: number, target: { lon: number, lat: number }) => {
+      if (!cameraRef.current || !controlsRef.current) return
+
+      const camera = cameraRef.current
+      const controls = controlsRef.current
+
+      // Convert target lat/lon to 3D point
+      const targetPoint = latLonToPoint3D(target, 1.0)
+      controls.target.copy(targetPoint)
+
+      // Set camera position at the specified distance from origin, pointing at target
+      const direction = targetPoint.clone().normalize()
+      camera.position.copy(direction.multiplyScalar(distance))
+
+      controls.update()
     }
-  }), [polygonVertices, onPolygonComplete, latLonToPoint3D, createLaserBeam, clearLaserBeam, onAnimationProgress, onCurrentGpsTime, onCurrentPosition])
+  }), [polygonVertices, onPolygonComplete, latLonToPoint3D, createLaserBeam, clearLaserBeam, onAnimationProgress, onCurrentGpsTime, onCurrentPosition, point3DToLatLon])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -318,7 +352,24 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
 
     // Create camera with closer near plane for sea-level viewing
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.001, 10000)
-    camera.position.set(0, 0, 3)
+
+    // Set initial camera position from prop or use default
+    if (initialCameraState) {
+      console.log('[GlobeViewer] Received initialCameraState:', initialCameraState)
+      const targetPoint = latLonToPoint3D(initialCameraState.target, 1.0)
+      console.log('[GlobeViewer] targetPoint (3D):', targetPoint)
+      const direction = targetPoint.clone().normalize()
+      console.log('[GlobeViewer] direction (normalized):', direction)
+      const finalPosition = direction.multiplyScalar(initialCameraState.distance)
+      console.log('[GlobeViewer] finalPosition:', finalPosition)
+      camera.position.copy(finalPosition)
+      console.log('[GlobeViewer] camera.position after copy:', camera.position)
+      console.log(`[GlobeViewer] Initialized camera with custom state: distance ${initialCameraState.distance.toFixed(2)}, target (${initialCameraState.target.lon.toFixed(2)}, ${initialCameraState.target.lat.toFixed(2)})`)
+    } else {
+      camera.position.set(0, 0, 3)
+      console.log('[GlobeViewer] Initialized camera with default position (0, 0, 3)')
+    }
+
     cameraRef.current = camera
 
     // Create renderer
@@ -490,6 +541,17 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
     controls.maxDistance = 10
     controls.autoRotate = false
     controls.autoRotateSpeed = 0.5
+
+    // Set initial controls target if provided
+    if (initialCameraState) {
+      const targetPoint = latLonToPoint3D(initialCameraState.target, 1.0)
+      console.log('[GlobeViewer] Setting controls target to 3D point:', targetPoint)
+      controls.target.copy(targetPoint)
+      controls.update()
+      console.log('[GlobeViewer] controls.target after update:', controls.target)
+      console.log(`[GlobeViewer] Set initial controls target to (${initialCameraState.target.lon.toFixed(2)}, ${initialCameraState.target.lat.toFixed(2)})`)
+    }
+
     controlsRef.current = controls
 
     // Animation loop

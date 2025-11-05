@@ -125,7 +125,6 @@ function App() {
   }
 
   const handleCurrentGpsTimeUpdate = (gpsTime: number | null) => {
-    console.log('App: Updating currentGpsTime to:', gpsTime)
     setCurrentGpsTime(gpsTime)
   }
 

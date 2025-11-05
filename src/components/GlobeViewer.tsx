@@ -217,11 +217,6 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
         return
       }
 
-      console.log('Starting satellite animation')
-      console.log('First point:', firstPoint)
-      console.log('Last point:', lastPoint)
-      console.log('Positions array provided:', positions ? `yes (${positions.length / 3} points)` : 'no')
-
       // Cancel any existing animation
       if (animationFrameRef.current !== null) {
         cancelAnimationFrame(animationFrameRef.current)
@@ -714,7 +709,6 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       '/Landsat 1, 2, and 3.glb',
       // onLoad callback
       (gltf) => {
-        console.log('Satellite model loaded successfully')
         const satellite = gltf.scene
 
         // Scale down the satellite (GLB models are often large)
@@ -730,16 +724,9 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
         // Add to scene
         sceneRef.current?.add(satellite)
         satelliteRef.current = satellite
-
-        console.log('Satellite added to scene at position:', satellite.position)
       },
       // onProgress callback
-      (progress) => {
-        if (progress.total > 0) {
-          const percent = (progress.loaded / progress.total) * 100
-          console.log(`Loading satellite model: ${percent.toFixed(1)}%`)
-        }
-      },
+      undefined,
       // onError callback
       (error) => {
         console.error('Error loading satellite model:', error)

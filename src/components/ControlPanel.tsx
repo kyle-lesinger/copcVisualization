@@ -206,7 +206,6 @@ export default function ControlPanel({
             <div className="satellite-info">
               <p><strong>Time:</strong> {(() => {
                 const displayTime = currentGpsTime !== null && currentGpsTime !== undefined ? currentGpsTime : firstPoint.gpsTime
-                console.log('ControlPanel: Displaying GPS time:', displayTime, '(currentGpsTime=', currentGpsTime, ')')
 
                 // Check if GPS time is valid (TAI seconds should be positive and reasonable)
                 if (displayTime > 0 && displayTime < 1e10) {

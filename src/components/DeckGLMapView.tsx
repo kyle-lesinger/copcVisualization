@@ -84,6 +84,8 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
     useEffect(() => {
       if (!mapContainer.current) return
 
+      console.log(`[DeckGLMapView] ===== MAP INITIALIZATION START =====`)
+      console.log(`[DeckGLMapView] Received props: center = (${center[0].toFixed(4)}, ${center[1].toFixed(4)}), zoom = ${zoom.toFixed(4)}`)
       console.log(`[DeckGLMapView] Initializing map with center (${center[0].toFixed(2)}, ${center[1].toFixed(2)}), zoom ${zoom}`)
 
       const map = new maplibregl.Map({
@@ -218,16 +220,14 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
       }
     }, [])
 
-    // Get subsample rate based on zoom level (same as ThreeJSLayer)
+    // Get subsample rate based on zoom level - all points by zoom 10
     const getSubsampleRate = (zoom: number): number => {
-      if (zoom < 4) return 1000      // ~460 points - far away
-      if (zoom < 6) return 500       // ~920 points
-      if (zoom < 8) return 200       // ~2,300 points
-      if (zoom < 10) return 100      // ~4,600 points
-      if (zoom < 12) return 50       // ~9,200 points
-      if (zoom < 14) return 20       // ~23,000 points
-      if (zoom < 16) return 10       // ~46,000 points
-      return 5                        // ~92,000 points - zoomed in close
+      if (zoom < 4) return 500       // ~920 points - far away
+      if (zoom < 6) return 200       // ~2,300 points
+      if (zoom < 8) return 50        // ~9,200 points
+      if (zoom < 9) return 10        // ~46,000 points
+      if (zoom < 10) return 2        // ~230,000 points
+      return 1                        // All ~460,000 points at zoom 10+
     }
 
     // Update deck.gl layers when data or settings change
@@ -236,7 +236,7 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
 
       // Get subsample rate based on current zoom level
       const subsampleRate = getSubsampleRate(currentZoom)
-      const useAveraging = subsampleRate >= 50 // Use averaging when zoomed out (high decimation)
+      const useAveraging = currentZoom < 9 // Use averaging when zoomed out (below zoom 9)
       const neighborCount = 40 // Number of neighbors to average
 
       console.log(`[DeckGLMapView] Zoom ${currentZoom.toFixed(1)}, subsample rate: 1:${subsampleRate}, averaging: ${useAveraging}`)

@@ -14,6 +14,7 @@ interface ControlPanelProps {
   viewMode: ViewMode
   onViewModeChange: (mode: ViewMode) => void
   dataRange: DataRange
+  globalDataRange: DataRange
   // Height filter controls
   heightFilter: HeightFilter
   onHeightFilterChange: (updates: Partial<HeightFilter>) => void
@@ -44,6 +45,7 @@ export default function ControlPanel({
   viewMode,
   onViewModeChange,
   dataRange,
+  globalDataRange,
   heightFilter,
   onHeightFilterChange,
   onResetHeightFilter,
@@ -112,8 +114,8 @@ export default function ControlPanel({
       <HeightFilterPanel
         minHeight={heightFilter.min}
         maxHeight={heightFilter.max}
-        absoluteMin={dataRange.elevation ? dataRange.elevation[0] : 0}
-        absoluteMax={dataRange.elevation ? dataRange.elevation[1] : 40}
+        absoluteMin={globalDataRange.elevation ? globalDataRange.elevation[0] : 0}
+        absoluteMax={globalDataRange.elevation ? globalDataRange.elevation[1] : 40}
         onApply={(min, max) => onHeightFilterChange({ min, max })}
         onReset={onResetHeightFilter}
         enabled={heightFilter.enabled}

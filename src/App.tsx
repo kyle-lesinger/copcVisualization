@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import PointCloudViewer from './components/PointCloudViewer'
 import FileSelector from './components/FileSelector'
 import ControlPanel from './components/ControlPanel'
@@ -45,6 +45,14 @@ function App() {
   const [colormap, setColormap] = useState<Colormap>('plasma')
   const [pointSize, setPointSize] = useState(2.0)
   const [viewMode, setViewMode] = useState<ViewMode>('space')
+
+  // Global data range - never changes, represents full unfiltered data
+  const [globalDataRange, setGlobalDataRange] = useState<DataRange>({
+    elevation: null,
+    intensity: null
+  })
+
+  // Current data range - may be filtered
   const [dataRange, setDataRange] = useState<DataRange>({
     elevation: null,
     intensity: null
@@ -69,7 +77,7 @@ function App() {
   const [lastPoint, setLastPoint] = useState<{ lon: number, lat: number, alt: number, gpsTime: number } | null>(null)
   const [currentGpsTime, setCurrentGpsTime] = useState<number | null>(null)
   const [currentPosition, setCurrentPosition] = useState<{ lat: number, lon: number } | null>(null)
-  const [animateSatelliteTrigger, setAnimateSatelliteTrigger] = useState(false)
+  const [animateSatelliteTrigger, setAnimateSatelliteTrigger] = useState(0)
 
   // Track if height filter has been initialized to prevent overwriting user changes
   const [heightFilterInitialized, setHeightFilterInitialized] = useState(false)
@@ -113,7 +121,7 @@ function App() {
   }
 
   const handleAnimateSatellite = () => {
-    setAnimateSatelliteTrigger(prev => !prev)
+    setAnimateSatelliteTrigger(prev => prev + 1)
   }
 
   const handleCurrentGpsTimeUpdate = (gpsTime: number | null) => {
@@ -132,22 +140,28 @@ function App() {
   const handleResetHeightFilter = () => {
     setHeightFilter(prev => ({
       ...prev,
-      min: dataRange.elevation ? dataRange.elevation[0] : 0,
-      max: dataRange.elevation ? dataRange.elevation[1] : 40
+      min: globalDataRange.elevation ? globalDataRange.elevation[0] : 0,
+      max: globalDataRange.elevation ? globalDataRange.elevation[1] : 40
     }))
   }
 
+  const handleGlobalDataRangeUpdate = useCallback((range: DataRange) => {
+    // Set both global range (for validation) and current range (for display)
+    setGlobalDataRange(range)
+    setDataRange(range)
+  }, [])
+
   // Update height filter range when data loads (only on initial load)
   useEffect(() => {
-    if (dataRange.elevation && !heightFilterInitialized) {
+    if (globalDataRange.elevation && !heightFilterInitialized) {
       setHeightFilter(prev => ({
         ...prev,
-        min: dataRange.elevation![0],
-        max: dataRange.elevation![1]
+        min: globalDataRange.elevation![0],
+        max: globalDataRange.elevation![1]
       }))
       setHeightFilterInitialized(true)
     }
-  }, [dataRange.elevation, heightFilterInitialized])
+  }, [globalDataRange.elevation, heightFilterInitialized])
 
   return (
     <div className="app">
@@ -157,6 +171,7 @@ function App() {
         colormap={colormap}
         pointSize={pointSize}
         viewMode={viewMode}
+        onGlobalDataRangeUpdate={handleGlobalDataRangeUpdate}
         onDataRangeUpdate={setDataRange}
         aoiPolygon={aoiPolygon}
         showScatterPlotTrigger={showScatterPlotTrigger}
@@ -190,6 +205,7 @@ function App() {
         viewMode={viewMode}
         onViewModeChange={setViewMode}
         dataRange={dataRange}
+        globalDataRange={globalDataRange}
         heightFilter={heightFilter}
         onHeightFilterChange={handleHeightFilterChange}
         onResetHeightFilter={handleResetHeightFilter}

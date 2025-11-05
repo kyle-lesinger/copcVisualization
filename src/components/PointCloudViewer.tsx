@@ -21,13 +21,14 @@ interface PointCloudViewerProps {
   colormap: Colormap
   pointSize: number
   viewMode: ViewMode
+  onGlobalDataRangeUpdate: (range: DataRange) => void
   onDataRangeUpdate: (range: DataRange) => void
   aoiPolygon: LatLon[] | null
   showScatterPlotTrigger?: boolean
   onAOIDataReady?: (hasData: boolean, pointCount?: number) => void
   onPolygonUpdate?: (polygon: LatLon[]) => void
   isDrawingAOI?: boolean
-  onAnimateSatelliteTrigger?: boolean
+  onAnimateSatelliteTrigger?: number
   onFirstPointUpdate?: (firstPoint: { lon: number, lat: number, alt: number, gpsTime: number } | null) => void
   onLastPointUpdate?: (lastPoint: { lon: number, lat: number, alt: number, gpsTime: number } | null) => void
   onCurrentGpsTimeUpdate?: (gpsTime: number | null) => void
@@ -35,7 +36,7 @@ interface PointCloudViewerProps {
   heightFilter?: HeightFilter
 }
 
-export default function PointCloudViewer({ files, colorMode, colormap, pointSize, viewMode, onDataRangeUpdate, aoiPolygon, showScatterPlotTrigger, onAOIDataReady, onPolygonUpdate, isDrawingAOI, onAnimateSatelliteTrigger, onFirstPointUpdate, onLastPointUpdate, onCurrentGpsTimeUpdate, onCurrentPositionUpdate, heightFilter }: PointCloudViewerProps) {
+export default function PointCloudViewer({ files, colorMode, colormap, pointSize, viewMode, onGlobalDataRangeUpdate, onDataRangeUpdate, aoiPolygon, showScatterPlotTrigger, onAOIDataReady, onPolygonUpdate, isDrawingAOI, onAnimateSatelliteTrigger, onFirstPointUpdate, onLastPointUpdate, onCurrentGpsTimeUpdate, onCurrentPositionUpdate, heightFilter }: PointCloudViewerProps) {
   const globeRef = useRef<GlobeViewerHandle>(null)
   const deckMapRef = useRef<DeckGLMapViewHandle>(null)
   const pointCloudsRef = useRef<THREE.Points[]>([])
@@ -68,6 +69,16 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
   const [dataVersion, setDataVersion] = useState(0) // Increment to trigger DeckGLMapView update
   const last2DMapStateRef = useRef<{ center: [number, number], zoom: number } | null>(null)
   const last3DCameraStateRef = useRef<{ distance: number, target: { lon: number, lat: number } } | null>(null)
+  const lastColorSettingsRef = useRef<{ colorMode: ColorMode, colormap: Colormap } | null>(null)
+  const lastViewModeRef = useRef<ViewMode>(viewMode)
+
+  // Store decimated data per point cloud for fast color updates
+  const decimatedDataRef = useRef<Array<{
+    positions: Float32Array
+    intensities: Uint16Array
+    classifications: Uint8Array
+  }>>([])
+
 
   // Keep ref in sync with map center/zoom state
   useEffect(() => {
@@ -215,6 +226,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
           }
         })
         pointCloudsRef.current = []
+        decimatedDataRef.current = [] // Clear decimated data for rebuild
 
         // Recreate point clouds with new decimation
         let totalPoints = 0
@@ -260,29 +272,45 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
             ? filteredRanges
             : globalRanges
 
-          switch (colorMode) {
-            case 'elevation':
-              computeElevationColors(
-                decimatedPositionsArray,
-                decimatedColors,
-                activeRanges.elevation![0],
-                activeRanges.elevation![1],
-                colormap
-              )
-              break
-            case 'intensity':
-              computeIntensityColors(
-                decimatedIntensitiesArray,
-                decimatedColors,
-                activeRanges.intensity![0],
-                activeRanges.intensity![1],
-                colormap,
-                true // Use CALIPSO scaling
-              )
-              break
-            case 'classification':
-              computeClassificationColors(decimatedClassificationsArray, decimatedColors)
-              break
+          // Only compute colors if ranges are available
+          if (activeRanges.elevation && activeRanges.intensity) {
+            switch (colorMode) {
+              case 'elevation':
+                computeElevationColors(
+                  decimatedPositionsArray,
+                  decimatedColors,
+                  activeRanges.elevation[0],
+                  activeRanges.elevation[1],
+                  colormap
+                )
+                break
+              case 'intensity':
+                computeIntensityColors(
+                  decimatedIntensitiesArray,
+                  decimatedColors,
+                  activeRanges.intensity[0],
+                  activeRanges.intensity[1],
+                  colormap,
+                  true // Use CALIPSO scaling
+                )
+                break
+              case 'classification':
+                computeClassificationColors(decimatedClassificationsArray, decimatedColors)
+                break
+            }
+          }
+
+          // Store decimated data for fast color updates
+          if (!decimatedDataRef.current[dataIndex]) {
+            decimatedDataRef.current[dataIndex] = {
+              positions: decimatedPositionsArray,
+              intensities: decimatedIntensitiesArray,
+              classifications: decimatedClassificationsArray
+            }
+          } else {
+            decimatedDataRef.current[dataIndex].positions = decimatedPositionsArray
+            decimatedDataRef.current[dataIndex].intensities = decimatedIntensitiesArray
+            decimatedDataRef.current[dataIndex].classifications = decimatedClassificationsArray
           }
 
           // Convert to globe coordinates
@@ -310,7 +338,64 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
         setStats(prev => ({ ...prev, points: totalPoints }))
       }
     }
-  }, [viewMode, filterPointsByHeight, getDecimationForDistance, pointSize])
+  }, [viewMode, filterPointsByHeight, getDecimationForDistance, pointSize, colorMode, colormap, globalRanges, filteredRanges])
+
+  // Fast color-only update for 3D view (no point cloud rebuild)
+  const updateColors3D = useCallback(() => {
+    if (!globeRef.current || pointCloudsRef.current.length === 0) return
+
+    // Determine which ranges to use for coloring
+    const activeRanges = (heightFilter?.enabled && filteredRanges.elevation && filteredRanges.intensity)
+      ? filteredRanges
+      : globalRanges
+
+    // Only update if ranges are available
+    if (!activeRanges.elevation || !activeRanges.intensity) return
+
+    console.log('[PointCloudViewer] Fast color update for 3D view, colorMode:', colorMode, 'colormap:', colormap)
+
+    // Update colors for each point cloud
+    pointCloudsRef.current.forEach((pointCloud, index) => {
+      const decimatedData = decimatedDataRef.current[index]
+      if (!decimatedData) return
+
+      // Get the color attribute from the geometry
+      const colorAttribute = pointCloud.geometry.getAttribute('color') as THREE.BufferAttribute
+      if (!colorAttribute) return
+
+      const colors = new Uint8Array(colorAttribute.array.length)
+
+      // Recompute colors based on current color mode
+      switch (colorMode) {
+        case 'elevation':
+          computeElevationColors(
+            decimatedData.positions,
+            colors,
+            activeRanges.elevation![0],
+            activeRanges.elevation![1],
+            colormap
+          )
+          break
+        case 'intensity':
+          computeIntensityColors(
+            decimatedData.intensities,
+            colors,
+            activeRanges.intensity![0],
+            activeRanges.intensity![1],
+            colormap,
+            true // Use CALIPSO scaling
+          )
+          break
+        case 'classification':
+          computeClassificationColors(decimatedData.classifications, colors)
+          break
+      }
+
+      // Update the color attribute
+      colorAttribute.array = colors
+      colorAttribute.needsUpdate = true
+    })
+  }, [colorMode, colormap, heightFilter, filteredRanges, globalRanges])
 
   // Start monitoring camera distance for LOD updates
   useEffect(() => {
@@ -470,7 +555,36 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
         }
         setGlobalRanges(ranges)
         setFilteredRanges(ranges) // Initially, filtered ranges = global ranges
-        onDataRangeUpdate(ranges)
+        onGlobalDataRangeUpdate(ranges) // Set the global data range that never changes
+        onDataRangeUpdate(ranges) // Set the current data range
+
+        // Compute colors for original data (needed for 2D view)
+        allData.forEach((data) => {
+          switch (colorMode) {
+            case 'elevation':
+              computeElevationColors(
+                data.positions,
+                data.colors,
+                ranges.elevation[0],
+                ranges.elevation[1],
+                colormap
+              )
+              break
+            case 'intensity':
+              computeIntensityColors(
+                data.intensities,
+                data.colors,
+                ranges.intensity[0],
+                ranges.intensity[1],
+                colormap,
+                true // Use CALIPSO scaling
+              )
+              break
+            case 'classification':
+              computeClassificationColors(data.classifications, data.colors)
+              break
+          }
+        })
 
         // Calculate map center from first file's data
         let minLng = Infinity, maxLng = -Infinity
@@ -490,34 +604,75 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
         // Create point clouds for each file
         let totalPoints = 0
         allData.forEach((data, dataIndex) => {
-          // Apply height filter before creating geometry
-          const filteredData = filterPointsByHeight(data)
+          // Don't apply height filter on initial load - it will be applied by the height filter effect
+          // This prevents reloading data every time the height filter changes
 
           // Distance-based decimation for globe view
           // Start with medium detail (1:10), will be updated based on camera distance
           const decimation = getDecimationForDistance(3.0) // Default camera distance
           const decimatedPositions: number[] = []
-          const decimatedColors: number[] = []
+          const decimatedIntensities: number[] = []
+          const decimatedClassifications: number[] = []
 
-          for (let i = 0; i < filteredData.positions.length; i += 3) {
+          for (let i = 0; i < data.positions.length; i += 3) {
             if ((i / 3) % decimation === 0) {
+              const pointIndex = i / 3
               decimatedPositions.push(
-                filteredData.positions[i],
-                filteredData.positions[i + 1],
-                filteredData.positions[i + 2]
+                data.positions[i],
+                data.positions[i + 1],
+                data.positions[i + 2]
               )
-              decimatedColors.push(
-                filteredData.colors[i],
-                filteredData.colors[i + 1],
-                filteredData.colors[i + 2]
-              )
+              decimatedIntensities.push(data.intensities[pointIndex])
+              decimatedClassifications.push(data.classifications[pointIndex])
             }
           }
 
-          console.log(`[PointCloudViewer] Globe decimation: ${data.positions.length / 3} points → (height filter) → ${filteredData.positions.length / 3} points → (decimation 1:${decimation}) → ${decimatedPositions.length / 3} points`)
+          console.log(`[PointCloudViewer] Globe initial load: ${data.positions.length / 3} points → (decimation 1:${decimation}) → ${decimatedPositions.length / 3} points (height filter will be applied separately)`)
 
           // Convert lat/lon/alt coordinates to 3D globe coordinates
           const decimatedPositionsArray = new Float32Array(decimatedPositions)
+          const decimatedIntensitiesArray = new Uint16Array(decimatedIntensities)
+          const decimatedClassificationsArray = new Uint8Array(decimatedClassifications)
+
+          // Compute colors for decimated points
+          const decimatedColors = new Uint8Array(decimatedPositions.length)
+          switch (colorMode) {
+            case 'elevation':
+              computeElevationColors(
+                decimatedPositionsArray,
+                decimatedColors,
+                ranges.elevation[0],
+                ranges.elevation[1],
+                colormap
+              )
+              break
+            case 'intensity':
+              computeIntensityColors(
+                decimatedIntensitiesArray,
+                decimatedColors,
+                ranges.intensity[0],
+                ranges.intensity[1],
+                colormap,
+                true // Use CALIPSO scaling
+              )
+              break
+            case 'classification':
+              computeClassificationColors(decimatedClassificationsArray, decimatedColors)
+              break
+          }
+
+          // Store decimated data for fast color updates
+          if (!decimatedDataRef.current[dataIndex]) {
+            decimatedDataRef.current[dataIndex] = {
+              positions: decimatedPositionsArray,
+              intensities: decimatedIntensitiesArray,
+              classifications: decimatedClassificationsArray
+            }
+          } else {
+            decimatedDataRef.current[dataIndex].positions = decimatedPositionsArray
+            decimatedDataRef.current[dataIndex].intensities = decimatedIntensitiesArray
+            decimatedDataRef.current[dataIndex].classifications = decimatedClassificationsArray
+          }
 
           // Store decimated positions for satellite animation (first dataset only)
           if (dataIndex === 0) {
@@ -529,7 +684,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
 
           const geometry = new THREE.BufferGeometry()
           geometry.setAttribute('position', new THREE.BufferAttribute(globePositions, 3))
-          geometry.setAttribute('color', new THREE.BufferAttribute(new Uint8Array(decimatedColors), 3, true))
+          geometry.setAttribute('color', new THREE.BufferAttribute(decimatedColors, 3, true))
 
           const material = new THREE.PointsMaterial({
             size: pointSize * 0.002, // Scale for globe view
@@ -557,7 +712,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
         setError(err.message || 'Failed to load COPC files')
         setLoading(false)
       })
-  }, [files, pointSize, onDataRangeUpdate, filterPointsByHeight])
+  }, [files, pointSize, onGlobalDataRangeUpdate, onDataRangeUpdate])
 
   // Rebuild point clouds when height filter changes
   useEffect(() => {
@@ -638,68 +793,89 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
 
     setStats(prev => ({ ...prev, points: totalPoints }))
 
+    // Update lastCameraDistanceRef to reflect the distance at which LOD was rebuilt
+    const camera = globeRef.current.getCamera()
+    if (camera) {
+      lastCameraDistanceRef.current = camera.position.length()
+      console.log(`[PointCloudViewer] Height filter change: Updated lastCameraDistanceRef to ${lastCameraDistanceRef.current.toFixed(2)}`)
+    }
+
     // Compute filtered ranges for display and coloring
     computeFilteredRanges()
 
     // Increment dataVersion to trigger DeckGLMapView update
     setDataVersion(prev => prev + 1)
-  }, [heightFilter, filterPointsByHeight, pointSize, viewMode, computeFilteredRanges, getDecimationForDistance])
+  }, [heightFilter, filterPointsByHeight, pointSize, viewMode, computeFilteredRanges, getDecimationForDistance, dataLoaded])
 
   // Update colors when color mode or colormap changes
   useEffect(() => {
     if (!globalRanges.elevation || !globalRanges.intensity) return
 
-    // Use filtered ranges if height filter is enabled, otherwise use global ranges
-    const activeRanges = (heightFilter?.enabled && filteredRanges.elevation && filteredRanges.intensity)
-      ? filteredRanges
-      : globalRanges
+    // Check if colors actually changed (not just viewMode)
+    const colorSettingsChanged = !lastColorSettingsRef.current ||
+      lastColorSettingsRef.current.colorMode !== colorMode ||
+      lastColorSettingsRef.current.colormap !== colormap
 
-    console.log('[PointCloudViewer] Updating colors for colorMode:', colorMode, 'using ranges:', activeRanges)
+    // Check if we just switched TO 3D view from 2D
+    const switchedTo3D = lastViewModeRef.current === '2d' && viewMode !== '2d'
 
-    dataRef.current.forEach((data, index) => {
-      // Update colors in the ORIGINAL data (for 2D map view)
-      const colors = data.colors
+    // Update the refs
+    lastColorSettingsRef.current = { colorMode, colormap }
+    lastViewModeRef.current = viewMode
 
-      switch (colorMode) {
-        case 'elevation':
-          computeElevationColors(
-            data.positions,
-            colors,
-            activeRanges.elevation![0],
-            activeRanges.elevation![1],
-            colormap
-          )
-          break
-        case 'intensity':
-          // Use filtered intensity range for better color mapping
-          computeIntensityColors(
-            data.intensities,
-            colors,
-            activeRanges.intensity![0],
-            activeRanges.intensity![1],
-            colormap,
-            true  // Enable CALIPSO scaling
-          )
-          break
-        case 'classification':
-          computeClassificationColors(data.classifications, colors)
-          break
-      }
+    if (viewMode === '2d') {
+      // For 2D view, just update the data and increment dataVersion
+      // The 2D map will pick up the new colors from dataRef.current
 
-      console.log(`[PointCloudViewer] Updated colors for dataset ${index}, sample:`, [colors[0], colors[1], colors[2]])
+      // Use filtered ranges if height filter is enabled, otherwise use global ranges
+      const activeRanges = (heightFilter?.enabled && filteredRanges.elevation && filteredRanges.intensity)
+        ? filteredRanges
+        : globalRanges
 
-      // Update the geometry for globe view
-      const pointCloud = pointCloudsRef.current[index]
-      if (pointCloud) {
-        const colorAttribute = pointCloud.geometry.getAttribute('color') as THREE.BufferAttribute
-        colorAttribute.array = colors
-        colorAttribute.needsUpdate = true
-      }
-    })
+      console.log('[PointCloudViewer] Updating colors for 2D view, colorMode:', colorMode, 'using ranges:', activeRanges)
 
-    // Increment dataVersion to notify DeckGLMapView that colors have changed
-    setDataVersion(prev => prev + 1)
-  }, [colorMode, colormap, globalRanges, filteredRanges, heightFilter, filterPointsByHeight])
+      dataRef.current.forEach((data, index) => {
+        const colors = data.colors
+
+        switch (colorMode) {
+          case 'elevation':
+            computeElevationColors(
+              data.positions,
+              colors,
+              activeRanges.elevation![0],
+              activeRanges.elevation![1],
+              colormap
+            )
+            break
+          case 'intensity':
+            computeIntensityColors(
+              data.intensities,
+              colors,
+              activeRanges.intensity![0],
+              activeRanges.intensity![1],
+              colormap,
+              true  // Enable CALIPSO scaling
+            )
+            break
+          case 'classification':
+            computeClassificationColors(data.classifications, colors)
+            break
+        }
+
+        console.log(`[PointCloudViewer] Updated colors for dataset ${index}, sample:`, [colors[0], colors[1], colors[2]])
+      })
+
+      // Increment dataVersion to notify DeckGLMapView that colors have changed
+      setDataVersion(prev => prev + 1)
+    } else if (colorSettingsChanged || switchedTo3D) {
+      // For 3D view, use fast color-only update if:
+      // 1. Colors actually changed, OR
+      // 2. We just switched to 3D view (to ensure colors are applied)
+      const reason = switchedTo3D ? 'switched to 3D view' : 'color/colormap changed'
+      console.log(`[PointCloudViewer] ${reason} in 3D view - fast color update`)
+      updateColors3D()
+    }
+  }, [colorMode, colormap, globalRanges, filteredRanges, heightFilter, filterPointsByHeight, viewMode, updateColors3D])
 
   // Update point size for globe view (2D handled by DeckGLMapView props)
   useEffect(() => {
@@ -792,6 +968,15 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
   // Handle view mode changes
   useEffect(() => {
     if (globeRef.current) {
+      // Capture 3D camera state BEFORE switching to 2D
+      if (viewMode === '2d') {
+        const cameraState = globeRef.current.getCameraState()
+        if (cameraState) {
+          last3DCameraStateRef.current = cameraState
+          console.log(`[PointCloudViewer] Captured 3D camera state before switching to 2D: distance ${cameraState.distance.toFixed(2)}, target (${cameraState.target.lon.toFixed(2)}, ${cameraState.target.lat.toFixed(2)})`)
+        }
+      }
+
       globeRef.current.setViewMode(viewMode)
 
       // Force LOD update when switching to 3D mode
@@ -849,9 +1034,9 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
     onLastPointUpdate?.(lastPoint)
   }, [lastPoint, onLastPointUpdate])
 
-  // Trigger satellite animation when requested
+  // Trigger satellite animation when requested (triggers on every change, regardless of value)
   useEffect(() => {
-    if (onAnimateSatelliteTrigger && globeRef.current && firstPoint && lastPoint) {
+    if (onAnimateSatelliteTrigger !== undefined && onAnimateSatelliteTrigger > 0 && globeRef.current && firstPoint && lastPoint) {
       // Use the currently displayed decimated positions for satellite animation
       // This ensures the satellite moves in sync with the visible point cloud
       const positions = displayedPositionsRef.current

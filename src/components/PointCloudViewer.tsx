@@ -146,15 +146,15 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
   // Get decimation factor based on camera distance from globe center
   const getDecimationForDistance = useCallback((distance: number): number => {
     // Earth radius is 1.0, so distance is from origin
+    // LOD pattern matches 2D view: 500, 200, 50, 10, 2, 1
     // When zoomed out (distance > 3): fewer points
     // When zoomed in (distance < 1.5): more points
 
-    if (distance > 5.0) return 100      // Very far: ~46,000 points
-    if (distance > 3.5) return 50       // Far: ~93,000 points
-    if (distance > 2.5) return 20       // Medium: ~232,000 points
+    if (distance > 5.0) return 500      // Very far: ~9,300 points
+    if (distance > 3.5) return 200      // Far: ~23,000 points
+    if (distance > 2.5) return 50       // Medium: ~93,000 points
     if (distance > 1.8) return 10       // Close: ~465,000 points
-    if (distance > 1.3) return 5        // Very close: ~930,000 points
-    if (distance > 1.1) return 2        // Extremely close: ~2.3M points
+    if (distance > 1.3) return 2        // Very close: ~2.3M points
     return 1                             // At surface: All points (~4.6M)
   }, [])
 
@@ -502,6 +502,14 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
     onDataRangeUpdate(ranges)
   }, [heightFilter, filterPointsByHeight, globalRanges, onDataRangeUpdate])
 
+  // Update filtered ranges when height filter changes (for both 2D and 3D views)
+  useEffect(() => {
+    if (!dataLoaded || dataRef.current.length === 0) return
+
+    console.log('[PointCloudViewer] Height filter or data changed, recomputing filtered ranges')
+    computeFilteredRanges()
+  }, [heightFilter, dataLoaded, computeFilteredRanges])
+
   // Globe viewer is initialized by the GlobeViewer component
 
   // Load COPC files
@@ -825,12 +833,9 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
       console.log(`[PointCloudViewer] Height filter change: Updated lastCameraDistanceRef to ${lastCameraDistanceRef.current.toFixed(2)}`)
     }
 
-    // Compute filtered ranges for display and coloring
-    computeFilteredRanges()
-
     // Increment dataVersion to trigger DeckGLMapView update
     setDataVersion(prev => prev + 1)
-  }, [heightFilter, filterPointsByHeight, pointSize, viewMode, computeFilteredRanges, getDecimationForDistance, dataLoaded])
+  }, [heightFilter, filterPointsByHeight, pointSize, viewMode, getDecimationForDistance, dataLoaded])
 
   // Update colors when color mode or colormap changes
   useEffect(() => {
@@ -844,9 +849,8 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
     // Check if we just switched TO 3D view from 2D
     const switchedTo3D = lastViewModeRef.current === '2d' && viewMode !== '2d'
 
-    // Update the refs
+    // Update the color settings ref (viewMode ref is managed by view mode change effect)
     lastColorSettingsRef.current = { colorMode, colormap }
-    lastViewModeRef.current = viewMode
 
     if (viewMode === '2d') {
       // For 2D view, just update the data and increment dataVersion
@@ -991,57 +995,63 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
 
   // Handle view mode changes
   useEffect(() => {
-    console.log(`[PointCloudViewer] View mode change effect triggered, viewMode = "${viewMode}", globeRef.current = ${!!globeRef.current}`)
+    const previousViewMode = lastViewModeRef.current
+    const viewModeActuallyChanged = previousViewMode !== viewMode
 
-    // Handle switching TO 2D: Use continuously-tracked 3D camera state
-    if (viewMode === '2d') {
-      console.log('[PointCloudViewer] Detected switch TO 2D, using tracked 3D camera state...')
-      const cameraState = last3DCameraStateRef.current
-      console.log('[PointCloudViewer] last3DCameraStateRef contains:', cameraState)
+    console.log(`[PointCloudViewer] View mode change effect triggered, viewMode = "${viewMode}", previous = "${previousViewMode}", actuallyChanged = ${viewModeActuallyChanged}`)
 
-      if (cameraState && cameraState.distance && cameraState.target) {
-        console.log(`[PointCloudViewer] Using tracked 3D camera state for 2D: distance ${cameraState.distance.toFixed(2)}, target (${cameraState.target.lon.toFixed(2)}, ${cameraState.target.lat.toFixed(2)})`)
+    // Only execute camera/remount logic if viewMode actually changed
+    if (viewModeActuallyChanged) {
+      // Handle switching TO 2D: Use continuously-tracked 3D camera state
+      if (viewMode === '2d') {
+        console.log('[PointCloudViewer] Detected switch TO 2D, using tracked 3D camera state...')
+        const cameraState = last3DCameraStateRef.current
+        console.log('[PointCloudViewer] last3DCameraStateRef contains:', cameraState)
 
-        // Convert 3D camera distance to 2D zoom level
-        const distanceToZoom = (distance: number): number => {
-          return Math.max(1, Math.min(18, 10 - Math.log2(distance) * 3))
+        if (cameraState && cameraState.distance && cameraState.target) {
+          console.log(`[PointCloudViewer] Using tracked 3D camera state for 2D: distance ${cameraState.distance.toFixed(2)}, target (${cameraState.target.lon.toFixed(2)}, ${cameraState.target.lat.toFixed(2)})`)
+
+          // Convert 3D camera distance to 2D zoom level
+          const distanceToZoom = (distance: number): number => {
+            return Math.max(1, Math.min(18, 10 - Math.log2(distance) * 3))
+          }
+
+          const { distance, target } = cameraState
+          const zoom = distanceToZoom(distance)
+          const center: [number, number] = [target.lon, target.lat]
+
+          console.log(`[PointCloudViewer] Before state update: mapCenter = (${mapCenter[0].toFixed(4)}, ${mapCenter[1].toFixed(4)}), mapZoom = ${mapZoom.toFixed(4)}`)
+
+          // Update state immediately so DeckGLMapView renders with correct values
+          setMapCenter(center)
+          setMapZoom(zoom)
+          setMapViewKey(prev => prev + 1) // Force DeckGLMapView remount with fresh props
+          last2DMapStateRef.current = { center, zoom }
+
+          console.log(`[PointCloudViewer] 3D→2D: distance ${distance.toFixed(4)} → zoom ${zoom.toFixed(4)}, center (${center[0].toFixed(4)}, ${center[1].toFixed(4)})`)
+        } else {
+          console.warn('[PointCloudViewer] No valid tracked 3D camera state available, using current mapCenter/mapZoom')
+          // Keep current map center/zoom if no 3D camera state
+          setMapViewKey(prev => prev + 1) // Still force remount to ensure clean state
         }
+      }
 
-        const { distance, target } = cameraState
-        const zoom = distanceToZoom(distance)
-        const center: [number, number] = [target.lon, target.lat]
-
-        console.log(`[PointCloudViewer] Before state update: mapCenter = (${mapCenter[0].toFixed(4)}, ${mapCenter[1].toFixed(4)}), mapZoom = ${mapZoom.toFixed(4)}`)
-
-        // Update state immediately so DeckGLMapView renders with correct values
-        setMapCenter(center)
-        setMapZoom(zoom)
-        setMapViewKey(prev => prev + 1) // Force DeckGLMapView remount with fresh props
-        last2DMapStateRef.current = { center, zoom }
-
-        console.log(`[PointCloudViewer] 3D→2D: distance ${distance.toFixed(4)} → zoom ${zoom.toFixed(4)}, center (${center[0].toFixed(4)}, ${center[1].toFixed(4)})`)
-      } else {
-        console.warn('[PointCloudViewer] No valid tracked 3D camera state available, using current mapCenter/mapZoom')
-        // Keep current map center/zoom if no 3D camera state
-        setMapViewKey(prev => prev + 1) // Still force remount to ensure clean state
+      // Handle switching TO 3D: Capture 2D map state if available
+      if (viewMode !== '2d' && deckMapRef.current) {
+        const mapState = deckMapRef.current.getMapState()
+        if (mapState) {
+          last2DMapStateRef.current = { center: mapState.center, zoom: mapState.zoom }
+          console.log(`[PointCloudViewer] Captured 2D map state before switching to 3D: center (${mapState.center[0].toFixed(2)}, ${mapState.center[1].toFixed(2)}), zoom ${mapState.zoom.toFixed(1)}`)
+        }
       }
     }
 
-    // Handle switching TO 3D: Capture 2D map state if available
-    if (viewMode !== '2d' && deckMapRef.current) {
-      const mapState = deckMapRef.current.getMapState()
-      if (mapState) {
-        last2DMapStateRef.current = { center: mapState.center, zoom: mapState.zoom }
-        console.log(`[PointCloudViewer] Captured 2D map state before switching to 3D: center (${mapState.center[0].toFixed(2)}, ${mapState.center[1].toFixed(2)}), zoom ${mapState.zoom.toFixed(1)}`)
-      }
-    }
-
-    // Update GlobeViewer if it exists
+    // Update GlobeViewer if it exists (do this every time, not just on view mode changes)
     if (globeRef.current) {
       globeRef.current.setViewMode(viewMode)
 
       // Force LOD update when switching to 3D mode
-      if (viewMode !== '2d') {
+      if (viewMode !== '2d' && viewModeActuallyChanged) {
         lastCameraDistanceRef.current = -1
         console.log('[PointCloudViewer] Switching to 3D mode - forcing LOD update')
 
@@ -1049,6 +1059,11 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
           updateGlobeLOD()
         }, 100)
       }
+    }
+
+    // Update the ref for next comparison (but don't update if we're in color update effect)
+    if (viewModeActuallyChanged) {
+      lastViewModeRef.current = viewMode
     }
   }, [viewMode, updateGlobeLOD])
 
@@ -1092,16 +1107,24 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
     onLastPointUpdate?.(lastPoint)
   }, [lastPoint, onLastPointUpdate])
 
-  // Trigger satellite animation when requested (triggers on every change, regardless of value)
+  // Trigger satellite animation when requested (triggers only when button is clicked)
   useEffect(() => {
-    if (onAnimateSatelliteTrigger !== undefined && onAnimateSatelliteTrigger > 0 && globeRef.current && firstPoint && lastPoint) {
+    if (onAnimateSatelliteTrigger !== undefined && onAnimateSatelliteTrigger > 0 && firstPoint && lastPoint) {
       // Use the currently displayed decimated positions for satellite animation
       // This ensures the satellite moves in sync with the visible point cloud
       const positions = displayedPositionsRef.current
       if (!positions) {
         console.warn('[PointCloudViewer] No decimated positions available for satellite animation')
       }
-      globeRef.current.animateSatelliteToFirstPoint(firstPoint, lastPoint, positions || undefined)
+
+      // Trigger animation on the appropriate view
+      // Note: viewMode is not a dependency, so animation only triggers when user clicks button,
+      // not when switching between views
+      if (viewMode === '2d' && deckMapRef.current) {
+        deckMapRef.current.animateSatellite(firstPoint, lastPoint, positions || undefined)
+      } else if (viewMode !== '2d' && globeRef.current) {
+        globeRef.current.animateSatelliteToFirstPoint(firstPoint, lastPoint, positions || undefined)
+      }
     }
   }, [onAnimateSatelliteTrigger, firstPoint, lastPoint])
 
@@ -1211,6 +1234,10 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
           isDrawingAOI={isDrawingAOI}
           aoiPolygon={aoiPolygon}
           onPolygonComplete={handlePolygonComplete}
+          onAnimationProgress={handleAnimationProgress}
+          onCurrentGpsTime={handleCurrentGpsTime}
+          onCurrentPosition={handleCurrentPosition}
+          animationProgress={animationProgress}
         />
       ) : (
         <GlobeViewer

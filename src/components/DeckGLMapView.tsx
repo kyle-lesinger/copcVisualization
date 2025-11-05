@@ -2,7 +2,10 @@ import { useEffect, useRef, forwardRef, useImperativeHandle, useState } from 're
 import maplibregl from 'maplibre-gl'
 import MapboxDraw from '@mapbox/mapbox-gl-draw'
 import { MapboxOverlay } from '@deck.gl/mapbox'
-import { ScatterplotLayer } from '@deck.gl/layers'
+import { ScatterplotLayer, LineLayer, IconLayer } from '@deck.gl/layers'
+import { SimpleMeshLayer } from '@deck.gl/mesh-layers'
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import * as THREE from 'three'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css'
 import './MapBackground.css'
@@ -21,6 +24,10 @@ interface DeckGLMapViewProps {
   isDrawingAOI?: boolean
   aoiPolygon?: LatLon[] | null
   onPolygonComplete?: (polygon: LatLon[]) => void
+  onAnimationProgress?: (progress: number) => void
+  onCurrentGpsTime?: (gpsTime: number) => void
+  onCurrentPosition?: (lat: number, lon: number) => void
+  animationProgress?: number // For progressive point rendering during satellite animation
 }
 
 export interface DeckGLMapViewHandle {
@@ -30,15 +37,21 @@ export interface DeckGLMapViewHandle {
   setDrawingMode: (enabled: boolean) => void
   clearPolygon: () => void
   getMapState: () => { center: [number, number], zoom: number } | null
+  animateSatellite: (firstPoint: { lon: number, lat: number, alt: number, gpsTime: number }, lastPoint: { lon: number, lat: number, alt: number, gpsTime: number }, positions?: Float32Array) => void
 }
 
 const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
-  ({ center, zoom = 5, data, colorMode, colormap, pointSize, dataVersion, isDrawingAOI, aoiPolygon, onPolygonComplete }, ref) => {
+  ({ center, zoom = 5, data, colorMode, colormap, pointSize, dataVersion, isDrawingAOI, aoiPolygon, onPolygonComplete, onAnimationProgress, onCurrentGpsTime, onCurrentPosition, animationProgress = 1.0 }, ref) => {
     const mapContainer = useRef<HTMLDivElement>(null)
     const mapRef = useRef<maplibregl.Map | null>(null)
     const deckOverlayRef = useRef<MapboxOverlay | null>(null)
     const drawRef = useRef<MapboxDraw | null>(null)
+    const animationFrameRef = useRef<number | null>(null)
     const [isDrawing, setIsDrawing] = useState(false)
+    const [satellitePosition, setSatellitePosition] = useState<[number, number, number] | null>(null)
+    const [laserLine, setLaserLine] = useState<[[number, number, number], [number, number, number]] | null>(null)
+    const [satelliteIcon, setSatelliteIcon] = useState<string | null>(null)
+    const lastCenterPropRef = useRef<[number, number] | null>(null)
 
     useImperativeHandle(ref, () => ({
       setCenter: (lng: number, lat: number) => {
@@ -77,8 +90,120 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
           center: [center.lng, center.lat],
           zoom
         }
+      },
+      animateSatellite: (firstPoint: { lon: number, lat: number, alt: number, gpsTime: number }, lastPoint: { lon: number, lat: number, alt: number, gpsTime: number }, positions?: Float32Array) => {
+        // Cancel any existing animation
+        if (animationFrameRef.current !== null) {
+          cancelAnimationFrame(animationFrameRef.current)
+          animationFrameRef.current = null
+        }
+
+        // Reset animation progress to 0
+        onAnimationProgress?.(0)
+
+        // Set initial satellite position (elevated above ground for visibility)
+        const satelliteAltitude = 100000 // 100km above ground for visibility in 2D
+        setSatellitePosition([firstPoint.lon, firstPoint.lat, satelliteAltitude])
+        setLaserLine([[firstPoint.lon, firstPoint.lat, satelliteAltitude], [firstPoint.lon, firstPoint.lat, 0]])
+
+        const startTime = Date.now()
+        const duration = 5000 // 5 seconds animation
+
+        // Animation loop
+        const animate = () => {
+          const elapsed = Date.now() - startTime
+          const progress = Math.min(elapsed / duration, 1.0)
+          const eased = progress
+
+          let currentLat, currentLon, currentGpsTime
+
+          if (positions) {
+            // Use actual point data
+            const totalPoints = positions.length / 3
+            const currentPointIndex = Math.floor(totalPoints * eased)
+            const clampedIndex = Math.min(currentPointIndex, totalPoints - 1)
+
+            currentLon = positions[clampedIndex * 3]
+            currentLat = positions[clampedIndex * 3 + 1]
+            currentGpsTime = firstPoint.gpsTime + (lastPoint.gpsTime - firstPoint.gpsTime) * eased
+          } else {
+            // Fallback to simple linear interpolation
+            currentLat = firstPoint.lat + (lastPoint.lat - firstPoint.lat) * eased
+            currentLon = firstPoint.lon + (lastPoint.lon - firstPoint.lon) * eased
+            currentGpsTime = firstPoint.gpsTime + (lastPoint.gpsTime - firstPoint.gpsTime) * eased
+          }
+
+          // Update satellite position and laser line (line from satellite to ground)
+          const satelliteAltitude = 100000 // 100km above ground
+          setSatellitePosition([currentLon, currentLat, satelliteAltitude])
+          setLaserLine([[currentLon, currentLat, satelliteAltitude], [currentLon, currentLat, 0]])
+
+          // Notify parent of progress, GPS time, and current position
+          onAnimationProgress?.(progress)
+          onCurrentGpsTime?.(currentGpsTime)
+          onCurrentPosition?.(currentLat, currentLon)
+
+          if (progress < 1.0) {
+            animationFrameRef.current = requestAnimationFrame(animate)
+          } else {
+            animationFrameRef.current = null
+            onAnimationProgress?.(1.0)
+            // Clear satellite and line after animation completes
+            setSatellitePosition(null)
+            setLaserLine(null)
+          }
+        }
+
+        animate()
       }
     }))
+
+    // Load satellite 3D model and create sprite
+    useEffect(() => {
+      const loader = new GLTFLoader()
+      loader.load(
+        '/Landsat 1, 2, and 3.glb',
+        (gltf) => {
+          // Create a scene to render the satellite model as an image
+          const scene = new THREE.Scene()
+          scene.background = new THREE.Color(0x000000) // Transparent background won't work, use black
+
+          const satellite = gltf.scene
+          satellite.scale.set(1, 1, 1)
+          scene.add(satellite)
+
+          // Add lighting
+          const ambientLight = new THREE.AmbientLight(0xffffff, 0.6)
+          scene.add(ambientLight)
+          const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8)
+          directionalLight.position.set(5, 5, 5)
+          scene.add(directionalLight)
+
+          // Create camera
+          const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000)
+          camera.position.set(3, 2, 3)
+          camera.lookAt(0, 0, 0)
+
+          // Create renderer
+          const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
+          renderer.setSize(128, 128)
+
+          // Render to canvas
+          renderer.render(scene, camera)
+
+          // Convert canvas to data URL
+          const iconDataUrl = renderer.domElement.toDataURL('image/png')
+          setSatelliteIcon(iconDataUrl)
+
+          // Cleanup
+          renderer.dispose()
+        },
+        undefined,
+        (error) => {
+          console.error('Error loading satellite model for 2D view:', error)
+        }
+      )
+    }, [])
 
     // Initialize map
     useEffect(() => {
@@ -169,13 +294,28 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
     // Update center when prop changes
     useEffect(() => {
       if (!mapRef.current) return
-      console.log(`[DeckGLMapView] Center prop changed to (${center[0].toFixed(2)}, ${center[1].toFixed(2)})`)
+
+      // Check if the prop actually changed from its previous value
+      const threshold = 0.0001 // ~10 meters tolerance
+      const propChanged = !lastCenterPropRef.current ||
+                         Math.abs(lastCenterPropRef.current[0] - center[0]) > threshold ||
+                         Math.abs(lastCenterPropRef.current[1] - center[1]) > threshold
+
+      if (!propChanged) {
+        // Prop didn't change, don't update the map
+        return
+      }
+
+      console.log(`[DeckGLMapView] Center prop changed from (${lastCenterPropRef.current?.[0].toFixed(4) ?? 'null'}, ${lastCenterPropRef.current?.[1].toFixed(4) ?? 'null'}) to (${center[0].toFixed(4)}, ${center[1].toFixed(4)})`)
+
       const updateCenter = () => {
         if (mapRef.current) {
-          console.log(`[DeckGLMapView] Updating map center to (${center[0].toFixed(2)}, ${center[1].toFixed(2)})`)
+          console.log(`[DeckGLMapView] Applying center update to map`)
           mapRef.current.setCenter([center[0], center[1]])
+          lastCenterPropRef.current = [center[0], center[1]]
         }
       }
+
       if (mapRef.current.loaded()) {
         updateCenter()
       } else {
@@ -310,14 +450,18 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
         }
       })
 
-      console.log('[DeckGLMapView] Creating layer with', points.length, 'points (subsampled from', data[0].positions.length / 3, ')')
+      // Apply animation progress to show only a subset of points (curtain effect)
+      const visiblePointCount = Math.floor(points.length * animationProgress)
+      const visiblePoints = points.slice(0, visiblePointCount)
+
+      console.log('[DeckGLMapView] Creating layer with', visiblePoints.length, '/', points.length, `points (${(animationProgress * 100).toFixed(1)}% progress)`)
       console.log('[DeckGLMapView] Sample colors:', points.slice(0, 5).map(p => p.color))
       console.log('[DeckGLMapView] ColorMode:', colorMode, 'Colormap:', colormap, 'DataVersion:', dataVersion)
 
       // Create scatterplot layer with round, billboard-facing points
-      const layer = new ScatterplotLayer({
+      const pointCloudLayer = new ScatterplotLayer({
         id: 'point-cloud',
-        data: points,
+        data: visiblePoints,
         getPosition: (d: any) => d.position,
         getFillColor: (d: any) => d.color,
         radiusMinPixels: 2, // Minimum pixel size
@@ -330,8 +474,60 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
         antialiasing: true // Smooth edges for rounder appearance
       })
 
-      deckOverlayRef.current.setProps({ layers: [layer] })
-    }, [data, colorMode, colormap, pointSize, dataVersion, currentZoom])
+      const layers: any[] = [pointCloudLayer]
+
+      // Add laser line layer if animating
+      if (laserLine) {
+        const laserLayer = new LineLayer({
+          id: 'laser-line',
+          data: [{ source: laserLine[0], target: laserLine[1] }],
+          getSourcePosition: (d: any) => d.source,
+          getTargetPosition: (d: any) => d.target,
+          getColor: [0, 255, 0], // Green color
+          getWidth: 3,
+          widthUnits: 'pixels'
+        })
+        layers.push(laserLayer)
+      }
+
+      // Add satellite icon layer if animating
+      if (satellitePosition && satelliteIcon) {
+        const satelliteLayer = new IconLayer({
+          id: 'satellite-icon',
+          data: [{ position: satellitePosition }],
+          getPosition: (d: any) => d.position,
+          getIcon: () => ({
+            url: satelliteIcon,
+            width: 128,
+            height: 128,
+            anchorY: 64
+          }),
+          getSize: 48,
+          sizeUnits: 'pixels',
+          pickable: false
+        })
+        layers.push(satelliteLayer)
+      } else if (satellitePosition) {
+        // Fallback to circle if icon not loaded yet
+        const satelliteLayer = new ScatterplotLayer({
+          id: 'satellite-model',
+          data: [{ position: satellitePosition }],
+          getPosition: (d: any) => d.position,
+          getFillColor: [255, 215, 0], // Gold color for satellite
+          getRadius: 20,
+          radiusUnits: 'pixels',
+          opacity: 1.0,
+          pickable: false,
+          stroked: true,
+          lineWidthUnits: 'pixels',
+          getLineWidth: 3,
+          getLineColor: [255, 255, 255] // White outline
+        })
+        layers.push(satelliteLayer)
+      }
+
+      deckOverlayRef.current.setProps({ layers })
+    }, [data, colorMode, colormap, pointSize, dataVersion, currentZoom, animationProgress, laserLine, satellitePosition, satelliteIcon])
 
     return <div ref={mapContainer} className="map-background" />
   }

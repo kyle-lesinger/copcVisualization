@@ -237,15 +237,9 @@ export default function ControlPanel({
             <button
               className="control-button primary"
               onClick={onAnimateSatellite}
-              disabled={viewMode === '2d'}
             >
               Animate Satellite Path
             </button>
-            {viewMode === '2d' && (
-              <p className="text-muted" style={{ fontSize: '12px', marginTop: '8px' }}>
-                Switch to Space View to animate satellite
-              </p>
-            )}
           </>
         ) : (
           <p className="text-muted">Loading data...</p>

@@ -8,7 +8,7 @@ import {
   computeIntensityColors,
   computeClassificationColors
 } from '../utils/copcLoader'
-import { convertPointsToGlobe, convertPointsTo2D, haversineDistance, calculateBearing } from '../utils/coordinateConversion'
+import { convertPointsToGlobe, convertPointsTo2D, haversineDistance, calculateBearing, calculatePointAtDistanceAndBearing } from '../utils/coordinateConversion'
 import { LatLon, filterDataByAOI } from '../utils/aoiSelector'
 import GlobeViewer, { GlobeViewerHandle } from './GlobeViewer'
 import DeckGLMapView, { DeckGLMapViewHandle } from './DeckGLMapView'
@@ -141,6 +141,12 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
     if (viewMode !== '2d' || !deckMapRef.current) return
 
     const updateMapState = () => {
+      // Skip map state tracking when ground mode is active to avoid interfering with camera animations
+      if (isGroundModeActive) {
+        console.log(`[PointCloudViewer] Skipping 2D map tracking - ground mode active`)
+        return
+      }
+
       if (deckMapRef.current) {
         const mapState = deckMapRef.current.getMapState()
         if (mapState) {
@@ -164,7 +170,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
     updateMapState() // Initial update
 
     return () => clearInterval(interval)
-  }, [viewMode])
+  }, [viewMode, isGroundModeActive])
 
   // AOI scatter plot state
   const [showScatterPlot, setShowScatterPlot] = useState(false)
@@ -322,11 +328,34 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
     const nearest = findNearestPoint(lat, lon)
 
     if (nearest) {
-      // Use the bearing directly toward the data curtain
-      // This makes the camera look AT the data, not perpendicular to it
+      // Use direct bearing from clicked ground position to nearest data point
+      // This makes the camera look directly at the data from the ground viewpoint
       const viewBearing = nearest.bearing
 
-      console.log(`[PointCloudViewer] Ground mode data: nearest at (${nearest.lat.toFixed(4)}, ${nearest.lon.toFixed(4)}), bearing to data: ${viewBearing.toFixed(1)}°`)
+      console.log(`[PointCloudViewer] Ground mode data:`)
+      console.log(`  Clicked position: (${lat.toFixed(4)}, ${lon.toFixed(4)})`)
+      console.log(`  Nearest data point: (${nearest.lat.toFixed(4)}, ${nearest.lon.toFixed(4)}) at ${nearest.alt.toFixed(2)}km altitude`)
+      console.log(`  Distance to nearest: ${nearest.distance.toFixed(1)}km`)
+      console.log(`  Camera bearing (looking at data): ${viewBearing.toFixed(1)}°`)
+
+      // Calculate camera position 10km from nearest point
+      const distanceFromData = 10 // km
+      const reverseBearing = (nearest.bearing + 180) % 360
+      const cameraPos = calculatePointAtDistanceAndBearing(
+        nearest.lat,
+        nearest.lon,
+        distanceFromData,
+        reverseBearing
+      )
+
+      console.log(`[PointCloudViewer] 🎯 Updating map center/zoom state for ground mode:`)
+      console.log(`  New center: (${cameraPos.lat.toFixed(6)}, ${cameraPos.lon.toFixed(6)})`)
+      console.log(`  New zoom: 9`)
+
+      // Update the map center and zoom state so flyTo won't be overridden
+      // MapLibre expects [longitude, latitude] order
+      setMapCenter([cameraPos.lon, cameraPos.lat])
+      setMapZoom(9)
 
       // Set enriched ground mode view data for DeckGLMapView
       setGroundModeViewData({
@@ -337,7 +366,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
         nearestAlt: nearest.alt,
         distance: nearest.distance,
         bearing: nearest.bearing,
-        perpendicularBearing: viewBearing  // Using direct bearing, not perpendicular
+        perpendicularBearing: viewBearing  // Use direct bearing to look at data
       })
     }
 

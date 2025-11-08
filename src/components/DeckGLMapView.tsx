@@ -10,6 +10,7 @@ import './MapBackground.css'
 import { PointCloudData } from '../utils/copcLoader'
 import { ColorMode, Colormap } from '../App'
 import { LatLon } from '../utils/aoiSelector'
+import { calculatePointAtDistanceAndBearing, isPointInPolygon, calculateBearing, haversineDistance } from '../utils/coordinateConversion'
 
 interface DeckGLMapViewProps {
   center: [number, number]
@@ -71,10 +72,15 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
     const polygonLinesRef = useRef<maplibregl.Marker | null>(null)
     const onPolygonCompleteRef = useRef(onPolygonComplete)
 
+    // Ground mode guidance rectangles
+    const [groundModeRectangles, setGroundModeRectangles] = useState<Array<{ polygon: Array<{ lat: number, lon: number }> }> | null>(null)
+    const [pulseAnimation, setPulseAnimation] = useState(false)
+
     // Refs for ground mode to avoid stale closures in click handler
     const isGroundModeActiveRef = useRef(isGroundModeActive)
     const isDrawingAOIRef = useRef(isDrawingAOI)
     const onGroundCameraPositionSetRef = useRef(onGroundCameraPositionSet)
+    const groundModeRectanglesRef = useRef(groundModeRectangles)
 
     // Store camera state before ground mode for restoration
     const preGroundModeCameraRef = useRef<{
@@ -84,13 +90,16 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
       pitch: number
     } | null>(null)
 
-    // Keep refs in sync with props
-    useEffect(() => {
-      isGroundModeActiveRef.current = isGroundModeActive
-      isDrawingAOIRef.current = isDrawingAOI
-      onGroundCameraPositionSetRef.current = onGroundCameraPositionSet
-      onPolygonCompleteRef.current = onPolygonComplete
-    }, [isGroundModeActive, isDrawingAOI, onGroundCameraPositionSet, onPolygonComplete])
+    // Store ground mode zoom listener cleanup function
+    const groundModeZoomCleanupRef = useRef<(() => void) | null>(null)
+
+    // Keep refs in sync with props - UPDATE DURING RENDER, not in an effect
+    // This ensures the refs are updated BEFORE effects run, preventing race conditions
+    isGroundModeActiveRef.current = isGroundModeActive
+    isDrawingAOIRef.current = isDrawingAOI
+    onGroundCameraPositionSetRef.current = onGroundCameraPositionSet
+    onPolygonCompleteRef.current = onPolygonComplete
+    groundModeRectanglesRef.current = groundModeRectangles
 
     // Clear polygon visualization markers and lines
     const clearPolygonVisualization = () => {
@@ -103,6 +112,170 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
         polygonLinesRef.current.remove()
         polygonLinesRef.current = null
       }
+    }
+
+    // Calculate ground mode guidance rectangles
+    const calculateGroundModeRectangles = (): Array<{ polygon: Array<{ lat: number, lon: number }> }> | null => {
+      if (data.length === 0) return null
+
+      // Find overall bounds across all datasets
+      let minLat = Infinity, maxLat = -Infinity
+      let minLon = Infinity, maxLon = -Infinity
+      let firstPoint: { lat: number, lon: number } | null = null
+      let lastPoint: { lat: number, lon: number } | null = null
+
+      data.forEach(dataset => {
+        // Use bounds from dataset
+        if (dataset.bounds) {
+          minLon = Math.min(minLon, dataset.bounds.min[0])
+          minLat = Math.min(minLat, dataset.bounds.min[1])
+          maxLon = Math.max(maxLon, dataset.bounds.max[0])
+          maxLat = Math.max(maxLat, dataset.bounds.max[1])
+        }
+
+        // Get first and last points for track direction
+        if (dataset.firstPoint && !firstPoint) {
+          firstPoint = { lat: dataset.firstPoint.lat, lon: dataset.firstPoint.lon }
+        }
+        if (dataset.lastPoint) {
+          lastPoint = { lat: dataset.lastPoint.lat, lon: dataset.lastPoint.lon }
+        }
+      })
+
+      if (!firstPoint || !lastPoint) {
+        console.warn('[DeckGLMapView] Missing first/last points for ground mode rectangles')
+        return null
+      }
+
+      // Calculate track direction (bearing from first to last point)
+      const trackBearing = calculateBearing(firstPoint.lat, firstPoint.lon, lastPoint.lat, lastPoint.lon)
+      console.log(`[DeckGLMapView] Track bearing: ${trackBearing.toFixed(1)}°`)
+
+      // Calculate perpendicular bearings (left and right of track)
+      const leftBearing = (trackBearing - 90 + 360) % 360  // 90° left (west)
+      const rightBearing = (trackBearing + 90) % 360        // 90° right (east)
+
+      // Calculate rectangle dimensions
+      const innerOffset = 150      // Start 150km from track (inner edge)
+      const outerOffset = 200      // End 200km from track (outer edge)
+
+      // Calculate track length to determine number of sample points
+      const trackLength = haversineDistance(firstPoint.lat, firstPoint.lon, lastPoint.lat, lastPoint.lon)
+      // Sample every ~50km along the track for smooth curves
+      const numSamples = Math.max(4, Math.ceil(trackLength / 50))
+      console.log(`[DeckGLMapView] Track length: ${trackLength.toFixed(1)}km, using ${numSamples} sample points`)
+
+      // Helper function to create a rectangle at a given offset
+      // Rectangle extends from firstPoint to lastPoint, between 150-200km perpendicular
+      const createRectangle = (bearing: number, isLeftSide: boolean): { polygon: Array<{ lat: number, lon: number }> } => {
+        const innerPoints: Array<{ lat: number, lon: number }> = []
+        const outerPoints: Array<{ lat: number, lon: number }> = []
+
+        // Sample points along the track from first to last
+        for (let i = 0; i < numSamples; i++) {
+          const fraction = i / (numSamples - 1)  // 0 to 1
+
+          // Interpolate position along great circle from firstPoint to lastPoint
+          // For simplicity, we'll calculate intermediate points along the track
+          const intermediateLat = firstPoint.lat + fraction * (lastPoint.lat - firstPoint.lat)
+          const intermediateLon = firstPoint.lon + fraction * (lastPoint.lon - firstPoint.lon)
+
+          // Calculate inner edge point at 200km perpendicular from this track position
+          const innerPoint = calculatePointAtDistanceAndBearing(
+            intermediateLat,
+            intermediateLon,
+            innerOffset,
+            bearing
+          )
+          innerPoints.push(innerPoint)
+
+          // Calculate outer edge point at 300km perpendicular from this track position
+          const outerPoint = calculatePointAtDistanceAndBearing(
+            intermediateLat,
+            intermediateLon,
+            outerOffset,
+            bearing
+          )
+          outerPoints.push(outerPoint)
+        }
+
+        // Verify actual distances from track for debugging (check first and last sample points)
+        // Do this BEFORE reversing outerPoints
+        const distFirstInner = haversineDistance(firstPoint.lat, firstPoint.lon, innerPoints[0].lat, innerPoints[0].lon)
+        const distFirstOuter = haversineDistance(firstPoint.lat, firstPoint.lon, outerPoints[0].lat, outerPoints[0].lon)
+        const distLastInner = haversineDistance(lastPoint.lat, lastPoint.lon, innerPoints[innerPoints.length - 1].lat, innerPoints[innerPoints.length - 1].lon)
+        const distLastOuter = haversineDistance(lastPoint.lat, lastPoint.lon, outerPoints[outerPoints.length - 1].lat, outerPoints[outerPoints.length - 1].lon)
+
+        // Build polygon by tracing the perimeter:
+        // Start with all inner points (from first to last)
+        // Then add outer points in reverse order (from last to first)
+        // This creates a closed loop around the rectangle
+        const polygon = [
+          ...innerPoints,                    // Inner edge: first → last
+          ...outerPoints.reverse()           // Outer edge: last → first
+        ]
+
+        console.log(`  🔍 Distance verification for bearing ${bearing.toFixed(1)}° (${numSamples} sample points):`)
+        console.log(`    First point inner: ${distFirstInner.toFixed(1)}km (should be ${innerOffset}km)`)
+        console.log(`    First point outer: ${distFirstOuter.toFixed(1)}km (should be ${outerOffset}km)`)
+        console.log(`    Last point inner: ${distLastInner.toFixed(1)}km (should be ${innerOffset}km)`)
+        console.log(`    Last point outer: ${distLastOuter.toFixed(1)}km (should be ${outerOffset}km)`)
+
+        return { polygon }
+      }
+
+      // Helper to calculate signed area for debugging
+      const calculateSignedArea = (polygon: Array<{ lat: number, lon: number }>) => {
+        let area = 0
+        for (let i = 0; i < polygon.length; i++) {
+          const j = (i + 1) % polygon.length
+          area += polygon[i].lon * polygon[j].lat
+          area -= polygon[j].lon * polygon[i].lat
+        }
+        return area / 2
+      }
+
+      // Create left and right rectangles
+      let leftRectangle = createRectangle(leftBearing, true)
+      let rightRectangle = createRectangle(rightBearing, false)
+
+      // Ensure both rectangles are counter-clockwise by checking signed area and reversing if needed
+      let leftArea = calculateSignedArea(leftRectangle.polygon)
+      let rightArea = calculateSignedArea(rightRectangle.polygon)
+
+      if (leftArea < 0) {
+        console.log('  ⚠️ Left rectangle is clockwise, reversing vertices')
+        leftRectangle = { polygon: [...leftRectangle.polygon].reverse() }
+        leftArea = -leftArea  // Flip sign after reversing
+      }
+      if (rightArea < 0) {
+        console.log('  ⚠️ Right rectangle is clockwise, reversing vertices')
+        rightRectangle = { polygon: [...rightRectangle.polygon].reverse() }
+        rightArea = -rightArea  // Flip sign after reversing
+      }
+
+      console.log('  Left rectangle signed area:', leftArea.toFixed(2), leftArea > 0 ? '(counter-clockwise)' : '(clockwise)')
+      console.log('  Right rectangle signed area:', rightArea.toFixed(2), rightArea > 0 ? '(counter-clockwise)' : '(clockwise)')
+
+      console.log('[DeckGLMapView] Ground mode rectangles calculated:')
+      console.log('  Track bearing:', trackBearing.toFixed(1), '°')
+      console.log('  Track extent: first point', firstPoint, 'last point', lastPoint)
+      console.log('  Left bearing:', leftBearing.toFixed(1), '°, Right bearing:', rightBearing.toFixed(1), '°')
+      console.log('  Left rectangle corners:', leftRectangle.polygon.map(p => `(${p.lat.toFixed(4)}, ${p.lon.toFixed(4)})`))
+      console.log('  Right rectangle corners:', rightRectangle.polygon.map(p => `(${p.lat.toFixed(4)}, ${p.lon.toFixed(4)})`))
+
+      // Calculate and log rectangle center for debugging
+      const leftCenter = {
+        lat: leftRectangle.polygon.reduce((sum, p) => sum + p.lat, 0) / 4,
+        lon: leftRectangle.polygon.reduce((sum, p) => sum + p.lon, 0) / 4
+      }
+      const rightCenter = {
+        lat: rightRectangle.polygon.reduce((sum, p) => sum + p.lat, 0) / 4,
+        lon: rightRectangle.polygon.reduce((sum, p) => sum + p.lon, 0) / 4
+      }
+      console.log('  Left center:', leftCenter, 'Right center:', rightCenter)
+
+      return [leftRectangle, rightRectangle]
     }
 
     useImperativeHandle(ref, () => ({
@@ -360,7 +533,73 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
         // Handle ground mode clicks (only when not drawing AOI)
         if (isGroundModeActiveRef.current && onGroundCameraPositionSetRef.current) {
           console.log(`[DeckGLMapView] Ground mode click detected at (${lat.toFixed(4)}, ${lng.toFixed(4)})`)
-          onGroundCameraPositionSetRef.current(lat, lng)
+
+          // Validate click is within one of the ground mode rectangles
+          const clickPoint = { lat, lon: lng }
+          let isValidClick = false
+
+          if (groundModeRectanglesRef.current && data.length > 0) {
+            // Use distance-based validation instead of polygon ray-casting
+            // Valid region: 150-200km perpendicular from satellite track
+
+            // Get track endpoints
+            let firstPoint: { lat: number, lon: number } | null = null
+            let lastPoint: { lat: number, lon: number } | null = null
+
+            data.forEach(dataset => {
+              if (dataset.firstPoint && !firstPoint) {
+                firstPoint = { lat: dataset.firstPoint.lat, lon: dataset.firstPoint.lon }
+              }
+              if (dataset.lastPoint) {
+                lastPoint = { lat: dataset.lastPoint.lat, lon: dataset.lastPoint.lon }
+              }
+            })
+
+            if (firstPoint && lastPoint) {
+              // Find minimum distance from click to track by sampling multiple points along the track
+              // This gives a better approximation of perpendicular distance than just checking endpoints
+              const numSamples = 20 // Sample 20 points along the track
+              let minDistToTrack = Infinity
+
+              for (let i = 0; i <= numSamples; i++) {
+                const t = i / numSamples
+                // Interpolate between first and last point
+                const sampleLat = firstPoint.lat + t * (lastPoint.lat - firstPoint.lat)
+                const sampleLon = firstPoint.lon + t * (lastPoint.lon - firstPoint.lon)
+
+                const dist = haversineDistance(lat, lng, sampleLat, sampleLon)
+                if (dist < minDistToTrack) {
+                  minDistToTrack = dist
+                }
+              }
+
+              console.log(`[DeckGLMapView] Distance-based validation:`)
+              console.log(`  Click location: (${lat.toFixed(4)}, ${lng.toFixed(4)})`)
+              console.log(`  Min distance to track (sampled ${numSamples} points): ${minDistToTrack.toFixed(1)}km`)
+
+              // Valid if distance is between 150-200km from track
+              if (minDistToTrack >= 150 && minDistToTrack <= 200) {
+                isValidClick = true
+                console.log(`  ✓ Click is valid: ${minDistToTrack.toFixed(1)}km from track (150-200km range)`)
+              } else {
+                console.log(`  ✗ Click is invalid: ${minDistToTrack.toFixed(1)}km from track (need 150-200km)`)
+              }
+            }
+          } else {
+            // If rectangles haven't been calculated yet, allow the click
+            console.log(`[DeckGLMapView] No rectangles calculated yet, allowing click`)
+            isValidClick = true
+          }
+
+          if (isValidClick) {
+            console.log(`[DeckGLMapView] ✓ Valid ground mode click within guidance rectangles - placing marker`)
+            onGroundCameraPositionSetRef.current(lat, lng)
+          } else {
+            console.log(`[DeckGLMapView] ✗ Invalid ground mode click outside guidance rectangles - triggering pulse`)
+            // Trigger pulse animation
+            setPulseAnimation(true)
+            setTimeout(() => setPulseAnimation(false), 500) // Reset after 500ms
+          }
         }
       }
       map.on('click', handleMapClick)
@@ -373,7 +612,18 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
 
     // Update center when prop changes
     useEffect(() => {
+      console.log(`[DeckGLMapView] Center effect triggered: hasMap=${!!mapRef.current}, isGroundModeActive=${isGroundModeActiveRef.current}, center=(${center[0].toFixed(4)}, ${center[1].toFixed(4)})`)
+
       if (!mapRef.current) return
+
+      // Skip center updates when ground mode is active and has view data
+      // The flyTo animation will handle the camera movement
+      if (isGroundModeActiveRef.current && groundModeViewData) {
+        console.log(`[DeckGLMapView] ⏭️  Skipping center update - ground mode flyTo will handle camera positioning`)
+        // Still update the ref to track the prop change
+        lastCenterPropRef.current = [center[0], center[1]]
+        return
+      }
 
       // Check if the prop actually changed from its previous value
       const threshold = 0.0001 // ~10 meters tolerance
@@ -383,6 +633,7 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
 
       if (!propChanged) {
         // Prop didn't change, don't update the map
+        console.log(`[DeckGLMapView] Center prop unchanged, skipping update`)
         return
       }
 
@@ -390,7 +641,7 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
 
       const updateCenter = () => {
         if (mapRef.current) {
-          console.log(`[DeckGLMapView] Applying center update to map`)
+          console.log(`[DeckGLMapView] ✅ Applying center update to map`)
           mapRef.current.setCenter([center[0], center[1]])
           lastCenterPropRef.current = [center[0], center[1]]
         }
@@ -401,7 +652,7 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
       } else {
         mapRef.current.once('load', updateCenter)
       }
-    }, [center])
+    }, [center, groundModeViewData])
 
     // Handle drawing mode changes (now handled by custom click system)
     // Old MapboxDraw mode switching is no longer needed
@@ -576,6 +827,40 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
         console.log(`[DeckGLMapView] Rendering completed polygon with ${completedPolygon.length} vertices`)
       }
 
+      // Add ground mode guidance rectangles (grey semi-transparent)
+      if (groundModeRectangles && groundModeRectangles.length > 0) {
+        groundModeRectangles.forEach((rect, index) => {
+          const polygonCoords = rect.polygon.map(v => [v.lon, v.lat])
+
+          // Calculate opacity based on pulse animation
+          const baseFillOpacity = 100
+          const baseStrokeOpacity = 200
+          const fillOpacity = pulseAnimation ? baseFillOpacity + 80 : baseFillOpacity  // Brighter when pulsing
+          const strokeOpacity = pulseAnimation ? 255 : baseStrokeOpacity
+
+          const rectangleLayer = new PolygonLayer({
+            id: `ground-mode-rectangle-${index}`,
+            data: [{ polygon: polygonCoords }],
+            getPolygon: (d: any) => d.polygon,
+            getFillColor: [128, 128, 128, fillOpacity], // Grey with transparency, brighter when pulsing
+            getLineColor: [80, 80, 80, strokeOpacity], // Darker grey border
+            getLineWidth: pulseAnimation ? 5 : 3, // Thicker when pulsing
+            lineWidthUnits: 'pixels',
+            filled: true,
+            stroked: true,
+            pickable: false,
+            transitions: {
+              getFillColor: { duration: 300, easing: (t: number) => t },
+              getLineWidth: { duration: 300, easing: (t: number) => t },
+              getLineColor: { duration: 300, easing: (t: number) => t }
+            }
+          })
+          layers.push(rectangleLayer)
+        })
+
+        console.log(`[DeckGLMapView] Rendering ${groundModeRectangles.length} ground mode guidance rectangles (pulse: ${pulseAnimation})`)
+      }
+
       // Add polygon lines if drawing vertices exist
       if (polygonVertices.length >= 2) {
         const lineSegments: Array<{ source: [number, number], target: [number, number] }> = []
@@ -659,13 +944,22 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
       }
 
       deckOverlayRef.current.setProps({ layers })
-    }, [data, colorMode, colormap, pointSize, dataVersion, currentZoom, animationProgress, laserLine, satellitePosition, satelliteIcon, polygonVertices, completedPolygon])
+    }, [data, colorMode, colormap, pointSize, dataVersion, currentZoom, animationProgress, laserLine, satellitePosition, satelliteIcon, polygonVertices, completedPolygon, groundModeRectangles, pulseAnimation])
 
     // Ground mode camera transition - create first-person ground view
     useEffect(() => {
-      if (!mapRef.current || !groundModeViewData) return
+      console.log(`[DeckGLMapView] Ground mode camera effect triggered:`, {
+        hasMap: !!mapRef.current,
+        hasViewData: !!groundModeViewData,
+        viewData: groundModeViewData
+      })
 
-      console.log(`[DeckGLMapView] Ground mode transition triggered: bearing=${groundModeViewData.perpendicularBearing.toFixed(1)}°, distance=${groundModeViewData.distance.toFixed(2)}km`)
+      if (!mapRef.current || !groundModeViewData) {
+        console.log(`[DeckGLMapView] Skipping ground mode transition - missing map or view data`)
+        return
+      }
+
+      console.log(`[DeckGLMapView] ✅ Ground mode transition STARTING: bearing=${groundModeViewData.perpendicularBearing.toFixed(1)}°, distance=${groundModeViewData.distance.toFixed(2)}km`)
 
       // Store current camera state ONLY on first ground mode activation (not on subsequent position changes)
       if (!preGroundModeCameraRef.current) {
@@ -681,24 +975,127 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
         console.log(`[DeckGLMapView] Ground position changed, keeping original saved camera state`)
       }
 
-      // Wait 500ms after marker placement, then animate camera
+      // Wait 100ms after marker placement, then animate camera
+      // Short delay ensures .setCenter() has completed before flyTo starts
       const transitionTimeout = setTimeout(() => {
-        if (!mapRef.current) return
+        console.log(`[DeckGLMapView] 🎬 TIMEOUT EXECUTING - starting camera animation`)
 
-        // Fly to clicked position with ground-level view
+        if (!mapRef.current) {
+          console.log(`[DeckGLMapView] ❌ No map reference in timeout, aborting`)
+          return
+        }
+
+        const initialZoom = 9  // Zoom level for ground view
+        const initialPitch = 85  // Look up at data
+
+        // Move camera much closer to the data (10km from nearest point)
+        // Calculate position 10km away from nearest point, in direction of clicked position
+        const distanceFromData = 10 // km
+        const bearing = groundModeViewData.bearing
+
+        // Calculate camera position: 10km from nearest data point, toward clicked position
+        const reverseBearing = (bearing + 180) % 360
+        const cameraLat = groundModeViewData.nearestLat
+        const cameraLon = groundModeViewData.nearestLon
+
+        // Use haversine to calculate position
+        const { lat: finalLat, lon: finalLon } = calculatePointAtDistanceAndBearing(
+          cameraLat,
+          cameraLon,
+          distanceFromData,
+          reverseBearing
+        )
+
+        console.log(`[DeckGLMapView] 📍 Moving camera to position 10km from data:`)
+        console.log(`  Camera position: (${finalLat.toFixed(6)}, ${finalLon.toFixed(6)})`)
+        console.log(`  Looking at nearest data point: (${cameraLat.toFixed(6)}, ${cameraLon.toFixed(6)})`)
+        console.log(`  Bearing: ${groundModeViewData.perpendicularBearing.toFixed(1)}°, Pitch: ${initialPitch}°, Zoom: ${initialZoom}`)
+
+        console.log(`[DeckGLMapView] 🚁 CALLING flyTo with:`, {
+          center: [finalLon, finalLat],
+          bearing: groundModeViewData.perpendicularBearing,
+          pitch: initialPitch,
+          zoom: initialZoom
+        })
+
+        // IMPORTANT: Stop any ongoing animations before starting flyTo
+        // This ensures flyTo starts from a clean state
+        console.log(`[DeckGLMapView] 🛑 Stopping any ongoing map animations`)
+        mapRef.current.stop()
+
+        // Define zoom handler for dynamic pitch adjustment (will be registered AFTER flyTo completes)
+        const handleGroundModeZoom = () => {
+          if (!mapRef.current || !isGroundModeActiveRef.current) return
+
+          const currentZoom = mapRef.current.getZoom()
+          const currentPitch = mapRef.current.getPitch()
+
+          console.log(`[DeckGLMapView] 📏 Zoom event fired in ground mode: zoom=${currentZoom.toFixed(2)}, pitch=${currentPitch.toFixed(2)}°`)
+
+          // Lower pitch when zoomed in (closer), higher when zoomed out
+          // Formula: start at 85° at zoom 9, decrease by 3° per zoom level
+          const dynamicPitch = Math.max(60, Math.min(85, 85 - (currentZoom - initialZoom) * 3))
+
+          // Only update if pitch difference is significant (avoid jitter)
+          if (Math.abs(currentPitch - dynamicPitch) > 1) {
+            console.log(`[DeckGLMapView] 🔧 Adjusting pitch from ${currentPitch.toFixed(1)}° to ${dynamicPitch.toFixed(1)}° (zoom=${currentZoom.toFixed(1)})`)
+            mapRef.current.setPitch(dynamicPitch)
+          }
+        }
+
+        // Add event listeners to track flyTo animation
+        const handleMoveStart = () => console.log(`[DeckGLMapView] 🛫 FlyTo animation STARTED`)
+        const handleMoveEnd = () => {
+          console.log(`[DeckGLMapView] 🛬 FlyTo animation COMPLETED`)
+
+          // NOW register the zoom listener AFTER flyTo has completed
+          // This prevents the zoom handler from canceling the flyTo animation
+          console.log(`[DeckGLMapView] 🎯 flyTo completed, now adding zoom listener for dynamic pitch adjustment`)
+          mapRef.current?.on('zoom', handleGroundModeZoom)
+
+          // Store cleanup function
+          groundModeZoomCleanupRef.current = () => {
+            console.log(`[DeckGLMapView] 🧹 Cleaning up ground mode zoom listener`)
+            mapRef.current?.off('zoom', handleGroundModeZoom)
+          }
+        }
+        const handleMove = () => {
+          const center = mapRef.current?.getCenter()
+          const zoom = mapRef.current?.getZoom()
+          const bearing = mapRef.current?.getBearing()
+          console.log(`[DeckGLMapView] 🚁 FlyTo in progress: center=(${center?.lat.toFixed(4)}, ${center?.lng.toFixed(4)}), zoom=${zoom?.toFixed(2)}, bearing=${bearing?.toFixed(2)}°`)
+        }
+
+        mapRef.current.once('movestart', handleMoveStart)
+        mapRef.current.once('moveend', handleMoveEnd)
+        mapRef.current.on('move', handleMove)
+
+        // Fly to position near the data with ground-level view
         mapRef.current.flyTo({
-          center: [groundModeViewData.clickedLon, groundModeViewData.clickedLat],
-          bearing: groundModeViewData.perpendicularBearing, // Look directly at data curtain
-          pitch: 85, // Look nearly straight up at data curtain
-          zoom: 12, // Appropriate zoom for ground view
+          center: [finalLon, finalLat],
+          bearing: groundModeViewData.perpendicularBearing, // Look toward nearest data point
+          pitch: initialPitch, // Look up at 85° to view data from ground level
+          zoom: initialZoom, // Zoom level 9
           duration: 2000, // 2 second transition
           essential: true
         })
 
-        console.log(`[DeckGLMapView] Ground mode view activated at (${groundModeViewData.clickedLat.toFixed(4)}, ${groundModeViewData.clickedLon.toFixed(4)})`)
-      }, 500)
+        console.log(`[DeckGLMapView] ✅ flyTo command sent - camera should be moving now`)
 
-      return () => clearTimeout(transitionTimeout)
+        // Clean up move listener after animation
+        setTimeout(() => {
+          mapRef.current?.off('move', handleMove)
+        }, 3000)
+      }, 100)
+
+      return () => {
+        clearTimeout(transitionTimeout)
+        // Clean up zoom listener if it exists
+        if (groundModeZoomCleanupRef.current) {
+          groundModeZoomCleanupRef.current()
+          groundModeZoomCleanupRef.current = null
+        }
+      }
     }, [groundModeViewData])
 
     // Restore camera when exiting ground mode
@@ -708,6 +1105,13 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
       // When ground mode is deactivated, restore the previous camera state
       if (!isGroundModeActive && preGroundModeCameraRef.current) {
         console.log(`[DeckGLMapView] Exiting ground mode, restoring camera:`, preGroundModeCameraRef.current)
+
+        // Clean up zoom listener
+        if (groundModeZoomCleanupRef.current) {
+          groundModeZoomCleanupRef.current()
+          groundModeZoomCleanupRef.current = null
+          console.log(`[DeckGLMapView] Cleaned up ground mode zoom listener`)
+        }
 
         mapRef.current.flyTo({
           center: preGroundModeCameraRef.current.center,
@@ -722,6 +1126,53 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
         preGroundModeCameraRef.current = null
       }
     }, [isGroundModeActive])
+
+    // Calculate ground mode rectangles when ground mode is activated
+    useEffect(() => {
+      if (isGroundModeActive && data.length > 0) {
+        console.log('[DeckGLMapView] Ground mode activated, calculating guidance rectangles')
+        const rectangles = calculateGroundModeRectangles()
+        setGroundModeRectangles(rectangles)
+      } else {
+        // Clear rectangles when ground mode is deactivated
+        setGroundModeRectangles(null)
+      }
+    }, [isGroundModeActive, data])
+
+    // Periodic camera logging every 5 seconds
+    useEffect(() => {
+      if (!mapRef.current) return
+
+      const logInterval = setInterval(() => {
+        if (!mapRef.current) return
+
+        const center = mapRef.current.getCenter()
+        const zoom = mapRef.current.getZoom()
+        const bearing = mapRef.current.getBearing()
+        const pitch = mapRef.current.getPitch()
+
+        console.log('═══════════════════════════════════════════')
+        console.log('📹 CAMERA SPECS (5s interval)')
+        console.log('═══════════════════════════════════════════')
+        console.log(`  Center: (${center.lat.toFixed(6)}, ${center.lng.toFixed(6)})`)
+        console.log(`  Zoom: ${zoom.toFixed(2)}`)
+        console.log(`  Bearing: ${bearing.toFixed(2)}°`)
+        console.log(`  Pitch: ${pitch.toFixed(2)}°`)
+        console.log(`  Ground Mode Active: ${isGroundModeActiveRef.current}`)
+        if (groundModeViewData) {
+          console.log(`  Ground Mode View Data:`)
+          console.log(`    Clicked: (${groundModeViewData.clickedLat.toFixed(6)}, ${groundModeViewData.clickedLon.toFixed(6)})`)
+          console.log(`    Nearest: (${groundModeViewData.nearestLat.toFixed(6)}, ${groundModeViewData.nearestLon.toFixed(6)})`)
+          console.log(`    Nearest Alt: ${groundModeViewData.nearestAlt.toFixed(3)}km`)
+          console.log(`    Distance to nearest: ${groundModeViewData.distance.toFixed(2)}km`)
+          console.log(`    Bearing to nearest: ${groundModeViewData.bearing.toFixed(2)}°`)
+          console.log(`    Camera bearing (perpendicular): ${groundModeViewData.perpendicularBearing.toFixed(2)}°`)
+        }
+        console.log('═══════════════════════════════════════════')
+      }, 5000)
+
+      return () => clearInterval(logInterval)
+    }, [groundModeViewData])
 
     // Visualize polygon vertices (both drawing and completed)
     useEffect(() => {

@@ -204,3 +204,78 @@ export function calculateBearing(
 
   return bearing
 }
+
+/**
+ * Calculate a new geographic point at a given distance and bearing from a starting point.
+ * Uses the Haversine formula for spherical earth calculations.
+ *
+ * @param lat Starting latitude in degrees
+ * @param lon Starting longitude in degrees
+ * @param distanceKm Distance to travel in kilometers
+ * @param bearingDeg Bearing/direction in degrees (0=North, 90=East, 180=South, 270=West)
+ * @returns Object with new latitude and longitude
+ */
+export function calculatePointAtDistanceAndBearing(
+  lat: number,
+  lon: number,
+  distanceKm: number,
+  bearingDeg: number
+): { lat: number; lon: number } {
+  // Convert to radians
+  const latRad = lat * (Math.PI / 180)
+  const lonRad = lon * (Math.PI / 180)
+  const bearingRad = bearingDeg * (Math.PI / 180)
+
+  // Angular distance in radians
+  const angularDistance = distanceKm / EARTH_RADIUS_KM
+
+  // Calculate new latitude
+  const newLatRad = Math.asin(
+    Math.sin(latRad) * Math.cos(angularDistance) +
+    Math.cos(latRad) * Math.sin(angularDistance) * Math.cos(bearingRad)
+  )
+
+  // Calculate new longitude
+  const newLonRad = lonRad + Math.atan2(
+    Math.sin(bearingRad) * Math.sin(angularDistance) * Math.cos(latRad),
+    Math.cos(angularDistance) - Math.sin(latRad) * Math.sin(newLatRad)
+  )
+
+  // Convert back to degrees
+  const newLat = newLatRad * (180 / Math.PI)
+  const newLon = newLonRad * (180 / Math.PI)
+
+  return { lat: newLat, lon: newLon }
+}
+
+/**
+ * Check if a point is inside a polygon using the ray-casting algorithm.
+ *
+ * @param point Object with lat and lon properties
+ * @param polygon Array of vertices, each with lat and lon properties
+ * @returns true if point is inside polygon, false otherwise
+ */
+export function isPointInPolygon(
+  point: { lat: number; lon: number },
+  polygon: Array<{ lat: number; lon: number }>
+): boolean {
+  if (polygon.length < 3) return false
+
+  let inside = false
+  const x = point.lon
+  const y = point.lat
+
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].lon
+    const yi = polygon[i].lat
+    const xj = polygon[j].lon
+    const yj = polygon[j].lat
+
+    const intersect = ((yi > y) !== (yj > y)) &&
+      (x < (xj - xi) * (y - yi) / (yj - yi) + xi)
+
+    if (intersect) inside = !inside
+  }
+
+  return inside
+}

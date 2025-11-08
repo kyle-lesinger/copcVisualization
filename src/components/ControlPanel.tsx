@@ -2,6 +2,7 @@ import { ColorMode, Colormap, DataRange, ViewMode, HeightFilter } from '../App'
 import { getColormapName } from '../utils/colormaps'
 import { formatTaiTime } from '../utils/copcLoader'
 import HeightFilterPanel from './HeightFilterPanel'
+import ColorBar from './ColorBar'
 import './ControlPanel.css'
 
 interface ControlPanelProps {
@@ -89,18 +90,59 @@ export default function ControlPanel({
       </div>
 
       {colorMode !== 'classification' && (
-        <div className="control-group">
-          <label className="control-label">Colormap</label>
-          <select
-            value={colormap}
-            onChange={(e) => onColormapChange(e.target.value as Colormap)}
-            className="control-select"
-          >
-            {colormaps.map(cm => (
-              <option key={cm} value={cm}>{getColormapName(cm)}</option>
-            ))}
-          </select>
-        </div>
+        <>
+          <div className="control-group">
+            <label className="control-label">Colormap</label>
+            <select
+              value={colormap}
+              onChange={(e) => onColormapChange(e.target.value as Colormap)}
+              className="control-select"
+            >
+              {colormaps.map(cm => (
+                <option key={cm} value={cm}>{getColormapName(cm)}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* ColorBar showing the current data range */}
+          {(() => {
+            // Determine which data range to display based on color mode and height filter
+            let minValue = 0
+            let maxValue = 1
+            let label = ''
+
+            if (colorMode === 'elevation') {
+              // For elevation, use height filter if enabled, otherwise use data range
+              if (heightFilter.enabled) {
+                minValue = heightFilter.min
+                maxValue = heightFilter.max
+                label = 'Altitude (km, filtered)'
+              } else if (dataRange.elevation) {
+                minValue = dataRange.elevation[0]
+                maxValue = dataRange.elevation[1]
+                label = 'Altitude (km)'
+              }
+            } else if (colorMode === 'intensity') {
+              if (dataRange.intensity) {
+                minValue = dataRange.intensity[0]
+                maxValue = dataRange.intensity[1]
+                label = 'Backscatter Intensity (532nm)'
+              }
+            }
+
+            // Only show colorbar if we have valid data
+            const hasValidRange = maxValue > minValue
+
+            return hasValidRange ? (
+              <ColorBar
+                colormap={colormap}
+                minValue={minValue}
+                maxValue={maxValue}
+                label={label}
+              />
+            ) : null
+          })()}
+        </>
       )}
 
       <div className="control-group">
@@ -142,25 +184,28 @@ export default function ControlPanel({
         </button>
       </div>
 
-      <div className="control-group">
-        <label className="control-label">Ground View</label>
-        <button
-          className={`control-button ${isGroundModeActive ? 'active' : ''}`}
-          onClick={onToggleGroundMode}
-        >
-          {isGroundModeActive ? '✓ Ground Mode Active' : '🏔️ Activate Ground Mode'}
-        </button>
-        {isGroundModeActive && !groundCameraPosition && (
-          <p className="text-muted" style={{ fontSize: '12px', marginTop: '8px' }}>
-            Click on globe/map to place camera
-          </p>
-        )}
-        {isGroundModeActive && groundCameraPosition && (
-          <p className="text-muted" style={{ fontSize: '12px', marginTop: '8px' }}>
-            Camera at {Math.abs(groundCameraPosition.lat).toFixed(4)}°{groundCameraPosition.lat < 0 ? 'S' : 'N'}, {Math.abs(groundCameraPosition.lon).toFixed(4)}°{groundCameraPosition.lon > 0 ? 'E' : 'W'}
-          </p>
-        )}
-      </div>
+      {/* Ground Mode is only available in 2D view */}
+      {viewMode === '2d' && (
+        <div className="control-group">
+          <label className="control-label">Ground View</label>
+          <button
+            className={`control-button ${isGroundModeActive ? 'active' : ''}`}
+            onClick={onToggleGroundMode}
+          >
+            {isGroundModeActive ? '✓ Ground Mode Active' : '🏔️ Activate Ground Mode'}
+          </button>
+          {isGroundModeActive && !groundCameraPosition && (
+            <p className="text-muted" style={{ fontSize: '12px', marginTop: '8px' }}>
+              Click on globe/map to place camera
+            </p>
+          )}
+          {isGroundModeActive && groundCameraPosition && (
+            <p className="text-muted" style={{ fontSize: '12px', marginTop: '8px' }}>
+              Camera at {Math.abs(groundCameraPosition.lat).toFixed(4)}°{groundCameraPosition.lat < 0 ? 'S' : 'N'}, {Math.abs(groundCameraPosition.lon).toFixed(4)}°{groundCameraPosition.lon > 0 ? 'E' : 'W'}
+            </p>
+          )}
+        </div>
+      )}
 
       <div className="aoi-controls">
         <h4>Area of Interest:</h4>

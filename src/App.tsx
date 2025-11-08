@@ -149,6 +149,13 @@ function App() {
         setColormap('jet')
         setPointSize(10)
       }
+
+      // Disable ground mode when switching to space view (ground mode only works in 2D)
+      if (mode === 'space' && isGroundModeActive) {
+        console.log(`[App] Switching to space view, disabling ground mode`)
+        setIsGroundModeActive(false)
+        setGroundCameraPosition(null)
+      }
     }
     setViewMode(mode)
   }

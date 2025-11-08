@@ -137,3 +137,70 @@ export function convertPointsTo2D(
 
   return cartesian
 }
+
+/**
+ * Calculate the haversine distance between two geographic coordinates.
+ * Returns distance in kilometers.
+ *
+ * @param lat1 Latitude of first point in degrees
+ * @param lon1 Longitude of first point in degrees
+ * @param lat2 Latitude of second point in degrees
+ * @param lon2 Longitude of second point in degrees
+ * @returns Distance in kilometers
+ */
+export function haversineDistance(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  // Convert to radians
+  const dLat = (lat2 - lat1) * (Math.PI / 180)
+  const dLon = (lon2 - lon1) * (Math.PI / 180)
+  const lat1Rad = lat1 * (Math.PI / 180)
+  const lat2Rad = lat2 * (Math.PI / 180)
+
+  // Haversine formula
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1Rad) * Math.cos(lat2Rad) * Math.sin(dLon / 2) * Math.sin(dLon / 2)
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+
+  return EARTH_RADIUS_KM * c
+}
+
+/**
+ * Calculate the bearing (direction) from one point to another.
+ * Returns bearing in degrees (0-360), where 0 is North, 90 is East, etc.
+ *
+ * @param lat1 Latitude of first point in degrees
+ * @param lon1 Longitude of first point in degrees
+ * @param lat2 Latitude of second point in degrees
+ * @param lon2 Longitude of second point in degrees
+ * @returns Bearing in degrees (0-360)
+ */
+export function calculateBearing(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  // Convert to radians
+  const lat1Rad = lat1 * (Math.PI / 180)
+  const lat2Rad = lat2 * (Math.PI / 180)
+  const dLon = (lon2 - lon1) * (Math.PI / 180)
+
+  // Calculate bearing
+  const y = Math.sin(dLon) * Math.cos(lat2Rad)
+  const x =
+    Math.cos(lat1Rad) * Math.sin(lat2Rad) -
+    Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLon)
+
+  let bearing = Math.atan2(y, x) * (180 / Math.PI)
+
+  // Normalize to 0-360
+  bearing = (bearing + 360) % 360
+
+  return bearing
+}

@@ -17,6 +17,8 @@ export interface GlobeViewerHandle {
   animateSatelliteToFirstPoint: (firstPoint: { lon: number, lat: number, alt: number, gpsTime: number }, lastPoint: { lon: number, lat: number, alt: number, gpsTime: number }, positions?: Float32Array) => void
   getCameraState: () => { distance: number, target: { lon: number, lat: number } } | null
   setCameraState: (distance: number, target: { lon: number, lat: number }) => void
+  pauseRendering: () => void
+  resumeRendering: () => void
 }
 
 interface GlobeViewerProps {
@@ -43,6 +45,8 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
   const laserBeamRef = useRef<THREE.Group | null>(null)
   const animationFrameRef = useRef<number | null>(null)
   const raycasterRef = useRef<THREE.Raycaster>(new THREE.Raycaster())
+  const renderEnabledRef = useRef<boolean>(true) // Control rendering during geometry updates
+  const lastCameraLogTimeRef = useRef<number>(0) // Throttle camera state logging
 
   // Polygon drawing state
   const [isDrawing, setIsDrawing] = useState(false)
@@ -274,7 +278,7 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       controls.update()
     },
     animateSatelliteToFirstPoint: (firstPoint: { lon: number, lat: number, alt: number, gpsTime: number }, lastPoint: { lon: number, lat: number, alt: number, gpsTime: number }, positions?: Float32Array) => {
-      if (!satelliteRef.current || !sceneRef.current) {
+      if (!satelliteRef.current || !sceneRef.current || !controlsRef.current) {
         console.warn('Satellite or scene not ready for animation')
         return
       }
@@ -284,6 +288,11 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
         cancelAnimationFrame(animationFrameRef.current)
         animationFrameRef.current = null
       }
+
+      // Disable OrbitControls during animation to prevent camera drift
+      const controls = controlsRef.current
+      controls.enabled = false
+      console.log('[GlobeViewer] 🔒 OrbitControls disabled for animation')
 
       // Reset animation progress to 0 (hides all points)
       onAnimationProgress?.(0)
@@ -325,8 +334,6 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
 
             // Interpolate GPS time linearly (we don't have individual GPS times per point here)
             currentGpsTime = firstPoint.gpsTime + (lastPoint.gpsTime - firstPoint.gpsTime) * eased
-
-            console.log(`Progress ${(eased * 100).toFixed(1)}%: Point ${currentPointIndex}/${totalPoints}, Lat=${currentLat.toFixed(2)}, Lon=${currentLon.toFixed(2)}`)
           } else {
             // Fallback to simple linear interpolation between first and last points
             currentLat = firstPoint.lat + (lastPoint.lat - firstPoint.lat) * eased
@@ -356,6 +363,12 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
           console.log('Animation complete')
           animationFrameRef.current = null
           onAnimationProgress?.(1.0) // Ensure final update
+
+          // Re-enable OrbitControls after animation completes
+          if (controlsRef.current) {
+            controlsRef.current.enabled = true
+            console.log('[GlobeViewer] 🔓 OrbitControls re-enabled')
+          }
         }
       }
 
@@ -372,6 +385,31 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       const target = controls.target.clone().normalize()
       const targetLatLon = point3DToLatLon(target)
 
+      // Throttle logging to once every 5 seconds
+      const now = Date.now()
+      if (now - lastCameraLogTimeRef.current >= 5000) {
+        lastCameraLogTimeRef.current = now
+
+        // Convert camera position to spherical coordinates for clarity
+        const camLatRad = Math.asin(camera.position.y / distance)
+        const camLonRad = Math.atan2(-camera.position.z, camera.position.x)
+        const camLatDeg = camLatRad * (180 / Math.PI)
+        const camLonDeg = camLonRad * (180 / Math.PI)
+
+        console.log('📸 GET Camera State:')
+        console.log('   Camera Position (Cartesian):')
+        console.log(`      x: ${camera.position.x.toFixed(4)} (East/West)`)
+        console.log(`      y: ${camera.position.y.toFixed(4)} (Up/Down)`)
+        console.log(`      z: ${camera.position.z.toFixed(4)} (North/South)`)
+        console.log('   Camera Position (Geographic):')
+        console.log(`      Latitude:  ${camLatDeg.toFixed(4)}°`)
+        console.log(`      Longitude: ${camLonDeg.toFixed(4)}°`)
+        console.log(`      Distance:  ${distance.toFixed(4)}`)
+        console.log('   Target:')
+        console.log(`      Cartesian: (${controls.target.x.toFixed(4)}, ${controls.target.y.toFixed(4)}, ${controls.target.z.toFixed(4)})`)
+        console.log(`      Lat/Lon: (${targetLatLon.lat.toFixed(4)}°, ${targetLatLon.lon.toFixed(4)}°)`)
+      }
+
       return {
         distance,
         target: { lon: targetLatLon.lon, lat: targetLatLon.lat }
@@ -383,15 +421,113 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       const camera = cameraRef.current
       const controls = controlsRef.current
 
+      console.log('==================== CAMERA STATE UPDATE ====================')
+      console.log('📍 Input Parameters:')
+      console.log(`   Distance: ${distance.toFixed(4)}`)
+      console.log(`   Target Lat/Lon: (${target.lat.toFixed(4)}°, ${target.lon.toFixed(4)}°)`)
+
       // Convert target lat/lon to 3D point
       const targetPoint = latLonToPoint3D(target, 1.0)
+      console.log(`   Target 3D Point: (${targetPoint.x.toFixed(4)}, ${targetPoint.y.toFixed(4)}, ${targetPoint.z.toFixed(4)})`)
       controls.target.copy(targetPoint)
 
-      // Set camera position at the specified distance from origin, pointing at target
-      const direction = targetPoint.clone().normalize()
-      camera.position.copy(direction.multiplyScalar(distance))
+      // Position camera using spherical coordinates relative to target
+      // Elevation: vertical angle above horizon (0° = on horizon, 90° = directly above)
+      // Azimuth: horizontal rotation around target (0° = north, 90° = east, 180° = south, 270° = west)
+      const elevationDegrees = 0  // Angle above target's horizon
+      const azimuthDegrees = 90    // Rotation around target (0° = due north of target)
+
+      const elevationRad = elevationDegrees * (Math.PI / 180)
+      const azimuthRad = azimuthDegrees * (Math.PI / 180)
+
+      console.log('📐 Camera Positioning (Spherical Coordinates):')
+      console.log(`   Elevation: ${elevationDegrees}° (angle above horizon)`)
+      console.log(`   Azimuth:   ${azimuthDegrees}° (rotation around target, 0°=North)`)
+      console.log(`   Distance:  ${distance.toFixed(4)}`)
+
+      // Convert target to 3D point (already done above, but for clarity)
+      const targetPos = targetPoint
+
+      // Calculate camera offset from target in spherical coordinates
+      // Using a local coordinate frame centered at the target
+
+      // Get "up" direction at target (radial direction from Earth center)
+      const up = targetPos.clone().normalize()
+
+      // Get "north" direction at target (tangent to meridian)
+      const north = new THREE.Vector3(0, 1, 0).cross(up).cross(up).normalize()
+      if (north.length() < 0.1) {
+        // Near poles, use a different reference
+        north.set(0, 0, 1).cross(up).normalize()
+      }
+
+      // Get "east" direction at target
+      const east = up.clone().cross(north).normalize()
+
+      // Calculate camera offset in local frame
+      const horizontalDist = distance * Math.cos(elevationRad)
+      const verticalDist = distance * Math.sin(elevationRad)
+
+      // Offset in local coordinates
+      const offsetNorth = horizontalDist * Math.cos(azimuthRad)
+      const offsetEast = horizontalDist * Math.sin(azimuthRad)
+      const offsetUp = verticalDist
+
+      console.log('   Offset from target (local frame):')
+      console.log(`      North: ${offsetNorth.toFixed(4)}`)
+      console.log(`      East:  ${offsetEast.toFixed(4)}`)
+      console.log(`      Up:    ${offsetUp.toFixed(4)}`)
+
+      // Convert to world coordinates
+      const cameraOffset = new THREE.Vector3()
+      cameraOffset.addScaledVector(north, offsetNorth)
+      cameraOffset.addScaledVector(east, offsetEast)
+      cameraOffset.addScaledVector(up, offsetUp)
+
+      const cameraPosition = targetPos.clone().add(cameraOffset)
+
+      console.log('📷 Final Camera Position (Cartesian):')
+      console.log(`   x: ${cameraPosition.x.toFixed(4)} (East/West component)`)
+      console.log(`   y: ${cameraPosition.y.toFixed(4)} (Up/Down component - elevation)`)
+      console.log(`   z: ${cameraPosition.z.toFixed(4)} (North/South component)`)
+
+      camera.position.copy(cameraPosition)
 
       controls.update()
+
+      // Convert camera position back to spherical for verification
+      const camDist = camera.position.length()
+      const camLatRad = Math.asin(camera.position.y / camDist)
+      const camLonRad = Math.atan2(-camera.position.z, camera.position.x)
+      const camLatDeg = camLatRad * (180 / Math.PI)
+      const camLonDeg = camLonRad * (180 / Math.PI)
+
+      // Calculate viewing angle/direction
+      const viewDirection = new THREE.Vector3().subVectors(controls.target, camera.position).normalize()
+      const viewDown = Math.asin(-viewDirection.y) * (180 / Math.PI) // Angle looking down from horizontal
+
+      // Log final state after update
+      console.log('✅ Controls Updated:')
+      console.log(`   Controls target (Cartesian): (${controls.target.x.toFixed(4)}, ${controls.target.y.toFixed(4)}, ${controls.target.z.toFixed(4)})`)
+      console.log(`   Camera position (Cartesian): (${camera.position.x.toFixed(4)}, ${camera.position.y.toFixed(4)}, ${camera.position.z.toFixed(4)})`)
+      console.log('')
+      console.log('📍 Camera Position (Geographic):')
+      console.log(`   Camera Latitude:  ${camLatDeg.toFixed(4)}°`)
+      console.log(`   Camera Longitude: ${camLonDeg.toFixed(4)}°`)
+      console.log(`   Camera Distance:  ${camDist.toFixed(4)}`)
+      console.log('')
+      console.log('👁️  Viewing Direction:')
+      console.log(`   Looking ${viewDown >= 0 ? 'down' : 'up'} at ${Math.abs(viewDown).toFixed(2)}° from horizontal`)
+      console.log(`   View vector: (${viewDirection.x.toFixed(4)}, ${viewDirection.y.toFixed(4)}, ${viewDirection.z.toFixed(4)})`)
+      console.log('============================================================')
+    },
+    pauseRendering: () => {
+      renderEnabledRef.current = false
+      console.log('[GlobeViewer] ⏸️  Rendering paused for geometry update')
+    },
+    resumeRendering: () => {
+      renderEnabledRef.current = true
+      console.log('[GlobeViewer] ▶️  Rendering resumed')
     }
   }), [polygonVertices, onPolygonComplete, latLonToPoint3D, createLaserBeam, clearLaserBeam, onAnimationProgress, onCurrentGpsTime, onCurrentPosition, point3DToLatLon])
 
@@ -410,22 +546,47 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
     // Create camera with closer near plane for sea-level viewing
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.001, 10000)
 
+    console.log('🎬 ==================== INITIAL CAMERA SETUP ====================')
+    console.log(`   FOV: 45°, Aspect: ${(width / height).toFixed(4)}, Near: 0.001, Far: 10000`)
+
     // Set initial camera position from prop or use default
     if (initialCameraState) {
-      console.log('[GlobeViewer] Received initialCameraState:', initialCameraState)
+      console.log('📍 Setting up camera with initial state:')
+      console.log(`   Distance: ${initialCameraState.distance.toFixed(4)}`)
+      console.log(`   Target Lat/Lon: (${initialCameraState.target.lat.toFixed(4)}°, ${initialCameraState.target.lon.toFixed(4)}°)`)
+
       const targetPoint = latLonToPoint3D(initialCameraState.target, 1.0)
-      console.log('[GlobeViewer] targetPoint (3D):', targetPoint)
+      console.log(`   Target 3D Point: (${targetPoint.x.toFixed(4)}, ${targetPoint.y.toFixed(4)}, ${targetPoint.z.toFixed(4)})`)
+
       const direction = targetPoint.clone().normalize()
-      console.log('[GlobeViewer] direction (normalized):', direction)
+      console.log(`   Direction (normalized): (${direction.x.toFixed(4)}, ${direction.y.toFixed(4)}, ${direction.z.toFixed(4)})`)
+
       const finalPosition = direction.multiplyScalar(initialCameraState.distance)
-      console.log('[GlobeViewer] finalPosition:', finalPosition)
+      console.log('   Final Position (Cartesian):')
+      console.log(`      x: ${finalPosition.x.toFixed(4)} (East/West)`)
+      console.log(`      y: ${finalPosition.y.toFixed(4)} (Up/Down)`)
+      console.log(`      z: ${finalPosition.z.toFixed(4)} (North/South)`)
+
       camera.position.copy(finalPosition)
-      console.log('[GlobeViewer] camera.position after copy:', camera.position)
-      console.log(`[GlobeViewer] Initialized camera with custom state: distance ${initialCameraState.distance.toFixed(2)}, target (${initialCameraState.target.lon.toFixed(2)}, ${initialCameraState.target.lat.toFixed(2)})`)
+
+      // Convert to spherical for verification
+      const dist = camera.position.length()
+      const camLat = Math.asin(camera.position.y / dist) * (180 / Math.PI)
+      const camLon = Math.atan2(-camera.position.z, camera.position.x) * (180 / Math.PI)
+
+      console.log('   Camera Position (Geographic):')
+      console.log(`      Latitude:  ${camLat.toFixed(4)}°`)
+      console.log(`      Longitude: ${camLon.toFixed(4)}°`)
+      console.log(`      Distance:  ${dist.toFixed(4)}`)
     } else {
       camera.position.set(0, 0, 3)
-      console.log('[GlobeViewer] Initialized camera with default position (0, 0, 3)')
+      console.log('📍 Using default camera position:')
+      console.log('   Cartesian: (0, 0, 3)')
+      console.log('   This is straight out along the Z-axis at distance 3')
+      console.log(`   Distance from origin: ${camera.position.length().toFixed(4)}`)
     }
+
+    console.log('============================================================')
 
     cameraRef.current = camera
 
@@ -601,12 +762,25 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
 
     // Set initial controls target if provided
     if (initialCameraState) {
+      console.log('🎯 ==================== INITIAL CONTROLS TARGET ====================')
       const targetPoint = latLonToPoint3D(initialCameraState.target, 1.0)
-      console.log('[GlobeViewer] Setting controls target to 3D point:', targetPoint)
+      console.log('   Target (Geographic):')
+      console.log(`      Latitude:  ${initialCameraState.target.lat.toFixed(4)}°`)
+      console.log(`      Longitude: ${initialCameraState.target.lon.toFixed(4)}°`)
+      console.log('   Target (Cartesian):')
+      console.log(`      x: ${targetPoint.x.toFixed(4)} (East/West)`)
+      console.log(`      y: ${targetPoint.y.toFixed(4)} (Up/Down)`)
+      console.log(`      z: ${targetPoint.z.toFixed(4)} (North/South)`)
+
       controls.target.copy(targetPoint)
       controls.update()
-      console.log('[GlobeViewer] controls.target after update:', controls.target)
-      console.log(`[GlobeViewer] Set initial controls target to (${initialCameraState.target.lon.toFixed(2)}, ${initialCameraState.target.lat.toFixed(2)})`)
+
+      console.log('')
+      console.log('   After controls.update():')
+      console.log(`      Controls target: (${controls.target.x.toFixed(4)}, ${controls.target.y.toFixed(4)}, ${controls.target.z.toFixed(4)})`)
+      console.log(`      Camera position: (${camera.position.x.toFixed(4)}, ${camera.position.y.toFixed(4)}, ${camera.position.z.toFixed(4)})`)
+      console.log(`      Camera distance: ${camera.position.length().toFixed(4)}`)
+      console.log('================================================================')
     }
 
     controlsRef.current = controls
@@ -617,7 +791,11 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       animationFrameId = requestAnimationFrame(animate)
 
       controls.update()
-      renderer.render(scene, camera)
+
+      // Only render if rendering is enabled (not paused for geometry updates)
+      if (renderEnabledRef.current) {
+        renderer.render(scene, camera)
+      }
     }
     animate()
 

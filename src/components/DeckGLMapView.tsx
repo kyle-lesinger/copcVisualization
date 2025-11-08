@@ -31,6 +31,16 @@ interface DeckGLMapViewProps {
   isGroundModeActive?: boolean
   groundCameraPosition?: { lat: number, lon: number } | null
   onGroundCameraPositionSet?: (lat: number, lon: number) => void
+  groundModeViewData?: {
+    clickedLat: number
+    clickedLon: number
+    nearestLat: number
+    nearestLon: number
+    nearestAlt: number
+    distance: number
+    bearing: number
+    perpendicularBearing: number
+  } | null
 }
 
 export interface DeckGLMapViewHandle {
@@ -44,7 +54,7 @@ export interface DeckGLMapViewHandle {
 }
 
 const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
-  ({ center, zoom = 5, data, colorMode, colormap, pointSize, dataVersion, isDrawingAOI, aoiPolygon, onPolygonComplete, onAnimationProgress, onCurrentGpsTime, onCurrentPosition, animationProgress = 1.0, isGroundModeActive, groundCameraPosition, onGroundCameraPositionSet }, ref) => {
+  ({ center, zoom = 5, data, colorMode, colormap, pointSize, dataVersion, isDrawingAOI, aoiPolygon, onPolygonComplete, onAnimationProgress, onCurrentGpsTime, onCurrentPosition, animationProgress = 1.0, isGroundModeActive, groundCameraPosition, onGroundCameraPositionSet, groundModeViewData }, ref) => {
     const mapContainer = useRef<HTMLDivElement>(null)
     const mapRef = useRef<maplibregl.Map | null>(null)
     const deckOverlayRef = useRef<MapboxOverlay | null>(null)
@@ -56,6 +66,26 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
     const [satelliteIcon, setSatelliteIcon] = useState<string | null>(null)
     const lastCenterPropRef = useRef<[number, number] | null>(null)
     const groundMarkerRef = useRef<maplibregl.Marker | null>(null)
+
+    // Refs for ground mode to avoid stale closures in click handler
+    const isGroundModeActiveRef = useRef(isGroundModeActive)
+    const isDrawingAOIRef = useRef(isDrawingAOI)
+    const onGroundCameraPositionSetRef = useRef(onGroundCameraPositionSet)
+
+    // Store camera state before ground mode for restoration
+    const preGroundModeCameraRef = useRef<{
+      center: [number, number]
+      zoom: number
+      bearing: number
+      pitch: number
+    } | null>(null)
+
+    // Keep refs in sync with props
+    useEffect(() => {
+      isGroundModeActiveRef.current = isGroundModeActive
+      isDrawingAOIRef.current = isDrawingAOI
+      onGroundCameraPositionSetRef.current = onGroundCameraPositionSet
+    }, [isGroundModeActive, isDrawingAOI, onGroundCameraPositionSet])
 
     useImperativeHandle(ref, () => ({
       setCenter: (lng: number, lat: number) => {
@@ -293,9 +323,11 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
       // Handle ground mode clicks
       const handleMapClick = (e: maplibregl.MapMouseEvent) => {
         // Only handle clicks when ground mode is active and not in drawing mode
-        if (isGroundModeActive && !isDrawing && onGroundCameraPositionSet) {
+        // Use refs to avoid stale closure values
+        if (isGroundModeActiveRef.current && !isDrawingAOIRef.current && onGroundCameraPositionSetRef.current) {
           const { lng, lat } = e.lngLat
-          onGroundCameraPositionSet(lat, lng)
+          console.log(`[DeckGLMapView] Ground mode click detected at (${lat.toFixed(4)}, ${lng.toFixed(4)})`)
+          onGroundCameraPositionSetRef.current(lat, lng)
         }
       }
       map.on('click', handleMapClick)
@@ -543,6 +575,64 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
 
       deckOverlayRef.current.setProps({ layers })
     }, [data, colorMode, colormap, pointSize, dataVersion, currentZoom, animationProgress, laserLine, satellitePosition, satelliteIcon])
+
+    // Ground mode camera transition - create first-person ground view
+    useEffect(() => {
+      if (!mapRef.current || !groundModeViewData) return
+
+      console.log(`[DeckGLMapView] Ground mode transition triggered: bearing=${groundModeViewData.perpendicularBearing.toFixed(1)}°, distance=${groundModeViewData.distance.toFixed(2)}km`)
+
+      // Store current camera state before transitioning
+      const currentCenter = mapRef.current.getCenter()
+      preGroundModeCameraRef.current = {
+        center: [currentCenter.lng, currentCenter.lat],
+        zoom: mapRef.current.getZoom(),
+        bearing: mapRef.current.getBearing(),
+        pitch: mapRef.current.getPitch()
+      }
+      console.log(`[DeckGLMapView] Saved camera state before ground mode:`, preGroundModeCameraRef.current)
+
+      // Wait 500ms after marker placement, then animate camera
+      const transitionTimeout = setTimeout(() => {
+        if (!mapRef.current) return
+
+        // Fly to clicked position with ground-level view
+        mapRef.current.flyTo({
+          center: [groundModeViewData.clickedLon, groundModeViewData.clickedLat],
+          bearing: groundModeViewData.perpendicularBearing, // Look directly at data curtain
+          pitch: 85, // Look nearly straight up at data curtain
+          zoom: 12, // Appropriate zoom for ground view
+          duration: 2000, // 2 second transition
+          essential: true
+        })
+
+        console.log(`[DeckGLMapView] Ground mode view activated at (${groundModeViewData.clickedLat.toFixed(4)}, ${groundModeViewData.clickedLon.toFixed(4)})`)
+      }, 500)
+
+      return () => clearTimeout(transitionTimeout)
+    }, [groundModeViewData])
+
+    // Restore camera when exiting ground mode
+    useEffect(() => {
+      if (!mapRef.current) return
+
+      // When ground mode is deactivated, restore the previous camera state
+      if (!isGroundModeActive && preGroundModeCameraRef.current) {
+        console.log(`[DeckGLMapView] Exiting ground mode, restoring camera:`, preGroundModeCameraRef.current)
+
+        mapRef.current.flyTo({
+          center: preGroundModeCameraRef.current.center,
+          zoom: preGroundModeCameraRef.current.zoom,
+          bearing: preGroundModeCameraRef.current.bearing,
+          pitch: preGroundModeCameraRef.current.pitch,
+          duration: 1500, // 1.5 second transition back
+          essential: true
+        })
+
+        // Clear the saved state after restoration
+        preGroundModeCameraRef.current = null
+      }
+    }, [isGroundModeActive])
 
     // Manage ground camera marker
     useEffect(() => {

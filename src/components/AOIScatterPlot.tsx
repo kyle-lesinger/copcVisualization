@@ -35,10 +35,11 @@ export default function AOIScatterPlot({ altitudes, intensities, pointCount, onC
   const chartRef = useRef(null)
 
   // Calculate min/max for both axes with padding
-  const minIntensity = Math.min(...intensities)
-  const maxIntensity = Math.max(...intensities)
-  const minAltitude = Math.min(...altitudes)
-  const maxAltitude = Math.max(...altitudes)
+  // Using reduce() instead of spread operator to avoid stack overflow with large datasets
+  const minIntensity = intensities.length > 0 ? intensities.reduce((min, val) => Math.min(min, val), Infinity) : 0
+  const maxIntensity = intensities.length > 0 ? intensities.reduce((max, val) => Math.max(max, val), -Infinity) : 1
+  const minAltitude = altitudes.length > 0 ? altitudes.reduce((min, val) => Math.min(min, val), Infinity) : 0
+  const maxAltitude = altitudes.length > 0 ? altitudes.reduce((max, val) => Math.max(max, val), -Infinity) : 1
 
   // Add 10% padding to the ranges for better visualization
   const intensityPadding = (maxIntensity - minIntensity) * 0.1

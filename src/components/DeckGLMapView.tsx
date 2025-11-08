@@ -1,13 +1,11 @@
 import { useEffect, useRef, forwardRef, useImperativeHandle, useState } from 'react'
 import maplibregl from 'maplibre-gl'
-import MapboxDraw from '@mapbox/mapbox-gl-draw'
 import { MapboxOverlay } from '@deck.gl/mapbox'
-import { ScatterplotLayer, LineLayer, IconLayer } from '@deck.gl/layers'
+import { ScatterplotLayer, LineLayer, IconLayer, PolygonLayer } from '@deck.gl/layers'
 import { SimpleMeshLayer } from '@deck.gl/mesh-layers'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
 import 'maplibre-gl/dist/maplibre-gl.css'
-import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css'
 import './MapBackground.css'
 import { PointCloudData } from '../utils/copcLoader'
 import { ColorMode, Colormap } from '../App'
@@ -58,7 +56,6 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
     const mapContainer = useRef<HTMLDivElement>(null)
     const mapRef = useRef<maplibregl.Map | null>(null)
     const deckOverlayRef = useRef<MapboxOverlay | null>(null)
-    const drawRef = useRef<MapboxDraw | null>(null)
     const animationFrameRef = useRef<number | null>(null)
     const [isDrawing, setIsDrawing] = useState(false)
     const [satellitePosition, setSatellitePosition] = useState<[number, number, number] | null>(null)
@@ -66,6 +63,13 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
     const [satelliteIcon, setSatelliteIcon] = useState<string | null>(null)
     const lastCenterPropRef = useRef<[number, number] | null>(null)
     const groundMarkerRef = useRef<maplibregl.Marker | null>(null)
+
+    // Custom polygon drawing state
+    const [polygonVertices, setPolygonVertices] = useState<LatLon[]>([])
+    const [completedPolygon, setCompletedPolygon] = useState<LatLon[] | null>(null)
+    const polygonMarkersRef = useRef<maplibregl.Marker[]>([])
+    const polygonLinesRef = useRef<maplibregl.Marker | null>(null)
+    const onPolygonCompleteRef = useRef(onPolygonComplete)
 
     // Refs for ground mode to avoid stale closures in click handler
     const isGroundModeActiveRef = useRef(isGroundModeActive)
@@ -85,7 +89,21 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
       isGroundModeActiveRef.current = isGroundModeActive
       isDrawingAOIRef.current = isDrawingAOI
       onGroundCameraPositionSetRef.current = onGroundCameraPositionSet
-    }, [isGroundModeActive, isDrawingAOI, onGroundCameraPositionSet])
+      onPolygonCompleteRef.current = onPolygonComplete
+    }, [isGroundModeActive, isDrawingAOI, onGroundCameraPositionSet, onPolygonComplete])
+
+    // Clear polygon visualization markers and lines
+    const clearPolygonVisualization = () => {
+      // Remove markers
+      polygonMarkersRef.current.forEach(marker => marker.remove())
+      polygonMarkersRef.current = []
+
+      // Remove line overlay if exists
+      if (polygonLinesRef.current) {
+        polygonLinesRef.current.remove()
+        polygonLinesRef.current = null
+      }
+    }
 
     useImperativeHandle(ref, () => ({
       setCenter: (lng: number, lat: number) => {
@@ -101,18 +119,30 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
       getMap: () => mapRef.current,
       setDrawingMode: (enabled: boolean) => {
         setIsDrawing(enabled)
-        if (drawRef.current) {
-          if (enabled) {
-            drawRef.current.changeMode('draw_polygon')
-          } else {
-            drawRef.current.changeMode('simple_select')
+        console.log(`[DeckGLMapView] Setting drawing mode: ${enabled}`)
+
+        if (!enabled) {
+          // User clicked "Finish AOI" - complete the polygon if we have at least 3 vertices
+          if (polygonVertices.length >= 3) {
+            console.log(`[DeckGLMapView] Completing polygon with ${polygonVertices.length} vertices`)
+            setCompletedPolygon(polygonVertices) // Keep the polygon highlighted
+            onPolygonCompleteRef.current?.(polygonVertices)
+            setPolygonVertices([]) // Clear drawing vertices but keep completed polygon
+          } else if (polygonVertices.length > 0) {
+            console.log(`[DeckGLMapView] Not enough vertices (${polygonVertices.length}), need at least 3`)
           }
+        } else {
+          // Starting new drawing - clear any existing vertices and completed polygon
+          setPolygonVertices([])
+          setCompletedPolygon(null)
+          clearPolygonVisualization()
         }
       },
       clearPolygon: () => {
-        if (drawRef.current) {
-          drawRef.current.deleteAll()
-        }
+        console.log('[DeckGLMapView] Clearing polygon')
+        setPolygonVertices([])
+        setCompletedPolygon(null)
+        clearPolygonVisualization()
       },
       getMapState: () => {
         if (!mapRef.current) return null
@@ -294,38 +324,41 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
       map.addControl(deckOverlay as any)
       deckOverlayRef.current = deckOverlay
 
-      // Initialize MapboxDraw for polygon drawing
-      const draw = new MapboxDraw({
-        displayControlsDefault: false,
-        controls: {},
-        defaultMode: 'simple_select'
-      })
-      map.addControl(draw as any)
-      drawRef.current = draw
-
-      // Listen for polygon creation
-      map.on('draw.create', (e: any) => {
-        if (e.features && e.features.length > 0) {
-          const feature = e.features[0]
-          if (feature.geometry.type === 'Polygon') {
-            // Convert GeoJSON coordinates to LatLon format
-            const coords = feature.geometry.coordinates[0] // First ring of polygon
-            const latLonArray: LatLon[] = coords.slice(0, -1).map((coord: number[]) => ({
-              lon: coord[0],
-              lat: coord[1]
-            }))
-            onPolygonComplete?.(latLonArray)
-            setIsDrawing(false)
-          }
-        }
-      })
-
-      // Handle ground mode clicks
+      // Custom click-based polygon drawing (3-4 vertex constraint)
+      // Handle clicks for both polygon drawing and ground mode
       const handleMapClick = (e: maplibregl.MapMouseEvent) => {
-        // Only handle clicks when ground mode is active and not in drawing mode
-        // Use refs to avoid stale closure values
-        if (isGroundModeActiveRef.current && !isDrawingAOIRef.current && onGroundCameraPositionSetRef.current) {
-          const { lng, lat } = e.lngLat
+        const { lng, lat } = e.lngLat
+
+        // Handle polygon drawing mode
+        if (isDrawingAOIRef.current) {
+          setPolygonVertices(prev => {
+            // Maximum 4 vertices
+            if (prev.length >= 4) {
+              console.log('[DeckGLMapView] Maximum 4 vertices reached, ignoring click')
+              return prev
+            }
+
+            const newVertices = [...prev, { lat, lon: lng }]
+            console.log(`[DeckGLMapView] Added vertex ${newVertices.length} at (${lat.toFixed(4)}, ${lng.toFixed(4)})`)
+
+            // Auto-complete when 4th vertex is added
+            if (newVertices.length === 4) {
+              console.log('[DeckGLMapView] Auto-completing polygon with 4 vertices')
+              setTimeout(() => {
+                setCompletedPolygon(newVertices) // Keep the polygon highlighted
+                onPolygonCompleteRef.current?.(newVertices)
+                setPolygonVertices([])
+                setIsDrawing(false)
+              }, 100) // Small delay to allow visual feedback
+            }
+
+            return newVertices
+          })
+          return
+        }
+
+        // Handle ground mode clicks (only when not drawing AOI)
+        if (isGroundModeActiveRef.current && onGroundCameraPositionSetRef.current) {
           console.log(`[DeckGLMapView] Ground mode click detected at (${lat.toFixed(4)}, ${lng.toFixed(4)})`)
           onGroundCameraPositionSetRef.current(lat, lng)
         }
@@ -370,21 +403,18 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
       }
     }, [center])
 
-    // Handle drawing mode changes
+    // Handle drawing mode changes (now handled by custom click system)
+    // Old MapboxDraw mode switching is no longer needed
     useEffect(() => {
-      if (!drawRef.current || isDrawingAOI === undefined) return
-
-      if (isDrawingAOI) {
-        drawRef.current.changeMode('draw_polygon')
-      } else {
-        drawRef.current.changeMode('simple_select')
-      }
+      setIsDrawing(isDrawingAOI ?? false)
     }, [isDrawingAOI])
 
     // Clear polygon when aoiPolygon is null
     useEffect(() => {
-      if (drawRef.current && aoiPolygon === null) {
-        drawRef.current.deleteAll()
+      if (aoiPolygon === null) {
+        setPolygonVertices([])
+        setCompletedPolygon(null)
+        clearPolygonVisualization()
       }
     }, [aoiPolygon])
 
@@ -523,6 +553,61 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
 
       const layers: any[] = [pointCloudLayer]
 
+      // Add completed polygon (highlighted region that persists until cleared)
+      if (completedPolygon && completedPolygon.length >= 3) {
+        // Convert LatLon[] to GeoJSON-style coordinates
+        const polygonCoords = completedPolygon.map(v => [v.lon, v.lat])
+
+        // Add filled polygon layer
+        const completedPolygonLayer = new PolygonLayer({
+          id: 'completed-polygon-fill',
+          data: [{ polygon: polygonCoords }],
+          getPolygon: (d: any) => d.polygon,
+          getFillColor: [255, 255, 0, 80], // Yellow with transparency
+          getLineColor: [255, 255, 0, 255], // Solid yellow border
+          getLineWidth: 3,
+          lineWidthUnits: 'pixels',
+          filled: true,
+          stroked: true,
+          pickable: false
+        })
+        layers.push(completedPolygonLayer)
+
+        console.log(`[DeckGLMapView] Rendering completed polygon with ${completedPolygon.length} vertices`)
+      }
+
+      // Add polygon lines if drawing vertices exist
+      if (polygonVertices.length >= 2) {
+        const lineSegments: Array<{ source: [number, number], target: [number, number] }> = []
+
+        // Connect consecutive vertices
+        for (let i = 0; i < polygonVertices.length - 1; i++) {
+          lineSegments.push({
+            source: [polygonVertices[i].lon, polygonVertices[i].lat],
+            target: [polygonVertices[i + 1].lon, polygonVertices[i + 1].lat]
+          })
+        }
+
+        // Close the polygon if we have 3+ vertices
+        if (polygonVertices.length >= 3) {
+          lineSegments.push({
+            source: [polygonVertices[polygonVertices.length - 1].lon, polygonVertices[polygonVertices.length - 1].lat],
+            target: [polygonVertices[0].lon, polygonVertices[0].lat]
+          })
+        }
+
+        const polygonLineLayer = new LineLayer({
+          id: 'polygon-lines',
+          data: lineSegments,
+          getSourcePosition: (d: any) => d.source,
+          getTargetPosition: (d: any) => d.target,
+          getColor: [255, 255, 0], // Yellow color for polygon
+          getWidth: 3,
+          widthUnits: 'pixels'
+        })
+        layers.push(polygonLineLayer)
+      }
+
       // Add laser line layer if animating
       if (laserLine) {
         const laserLayer = new LineLayer({
@@ -574,7 +659,7 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
       }
 
       deckOverlayRef.current.setProps({ layers })
-    }, [data, colorMode, colormap, pointSize, dataVersion, currentZoom, animationProgress, laserLine, satellitePosition, satelliteIcon])
+    }, [data, colorMode, colormap, pointSize, dataVersion, currentZoom, animationProgress, laserLine, satellitePosition, satelliteIcon, polygonVertices, completedPolygon])
 
     // Ground mode camera transition - create first-person ground view
     useEffect(() => {
@@ -633,6 +718,68 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
         preGroundModeCameraRef.current = null
       }
     }, [isGroundModeActive])
+
+    // Visualize polygon vertices (both drawing and completed)
+    useEffect(() => {
+      if (!mapRef.current) return
+
+      // Clear existing visualization
+      clearPolygonVisualization()
+
+      // Show markers for completed polygon (if exists)
+      if (completedPolygon && completedPolygon.length > 0) {
+        completedPolygon.forEach((vertex, index) => {
+          const el = document.createElement('div')
+          el.style.width = '20px'
+          el.style.height = '20px'
+          el.style.cursor = 'default'
+
+          // Yellow markers for completed polygon
+          el.innerHTML = `
+            <svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="10" cy="10" r="6" fill="#ffff00" stroke="#ffffff" stroke-width="2" opacity="0.9"/>
+              <text x="10" y="14" font-size="10" fill="#000000" text-anchor="middle">${index + 1}</text>
+            </svg>
+          `
+
+          const marker = new maplibregl.Marker({ element: el, anchor: 'center' })
+            .setLngLat([vertex.lon, vertex.lat])
+            .addTo(mapRef.current!)
+
+          polygonMarkersRef.current.push(marker)
+        })
+
+        console.log(`[DeckGLMapView] Visualizing completed polygon with ${completedPolygon.length} vertices`)
+      }
+
+      // Show markers for vertices being drawn (if any)
+      if (polygonVertices.length > 0) {
+        polygonVertices.forEach((vertex, index) => {
+          const el = document.createElement('div')
+          el.style.width = '20px'
+          el.style.height = '20px'
+          el.style.cursor = 'pointer'
+
+          // Different color for first vertex
+          const color = index === 0 ? '#00ff00' : '#ff0000'
+
+          el.innerHTML = `
+            <svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="10" cy="10" r="6" fill="${color}" stroke="#ffffff" stroke-width="2" opacity="0.9"/>
+              <text x="10" y="14" font-size="10" fill="#ffffff" text-anchor="middle">${index + 1}</text>
+            </svg>
+          `
+
+          const marker = new maplibregl.Marker({ element: el, anchor: 'center' })
+            .setLngLat([vertex.lon, vertex.lat])
+            .addTo(mapRef.current!)
+
+          polygonMarkersRef.current.push(marker)
+        })
+
+        console.log(`[DeckGLMapView] Visualizing ${polygonVertices.length} drawing vertices`)
+      }
+    }, [polygonVertices, completedPolygon])
 
     // Manage ground camera marker
     useEffect(() => {

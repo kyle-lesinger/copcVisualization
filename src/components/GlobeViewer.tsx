@@ -52,7 +52,9 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
   const [isDrawing, setIsDrawing] = useState(false)
   const isDrawingRef = useRef(false)
   const [polygonVertices, setPolygonVertices] = useState<LatLon[]>([])
+  const [completedPolygon, setCompletedPolygon] = useState<LatLon[] | null>(null)
   const polygonGroupRef = useRef<THREE.Group | null>(null)
+  const onPolygonCompleteRef = useRef(onPolygonComplete)
 
   // Ground mode marker ref
   const groundMarkerRef = useRef<THREE.Group | null>(null)
@@ -231,14 +233,29 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
     getPolygon: () => polygonVertices,
     clearPolygon: () => {
       setPolygonVertices([])
+      setCompletedPolygon(null)
       clearPolygonVisualization()
     },
     setDrawingMode: (enabled: boolean) => {
+      console.log(`[GlobeViewer] Setting drawing mode: ${enabled}`)
       setIsDrawing(enabled)
       isDrawingRef.current = enabled
-      if (!enabled && polygonVertices.length >= 3) {
-        // Complete the polygon
-        onPolygonComplete?.(polygonVertices)
+
+      if (!enabled) {
+        // User clicked "Finish AOI" - complete the polygon if we have at least 3 vertices
+        if (polygonVertices.length >= 3) {
+          console.log(`[GlobeViewer] Completing polygon with ${polygonVertices.length} vertices`)
+          setCompletedPolygon(polygonVertices) // Keep the polygon highlighted
+          onPolygonCompleteRef.current?.(polygonVertices)
+          setPolygonVertices([]) // Clear drawing vertices but keep completed polygon
+        } else if (polygonVertices.length > 0) {
+          console.log(`[GlobeViewer] Not enough vertices (${polygonVertices.length}), need at least 3`)
+        }
+      } else {
+        // Starting new drawing - clear any existing vertices and completed polygon
+        setPolygonVertices([])
+        setCompletedPolygon(null)
+        clearPolygonVisualization()
       }
     },
     setViewMode: (mode: 'space' | '2d') => {
@@ -529,7 +546,12 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       renderEnabledRef.current = true
       console.log('[GlobeViewer] ▶️  Rendering resumed')
     }
-  }), [polygonVertices, onPolygonComplete, latLonToPoint3D, createLaserBeam, clearLaserBeam, onAnimationProgress, onCurrentGpsTime, onCurrentPosition, point3DToLatLon])
+  }), [polygonVertices, completedPolygon, onPolygonComplete, latLonToPoint3D, createLaserBeam, clearLaserBeam, onAnimationProgress, onCurrentGpsTime, onCurrentPosition, point3DToLatLon])
+
+  // Keep ref in sync with prop
+  useEffect(() => {
+    onPolygonCompleteRef.current = onPolygonComplete
+  }, [onPolygonComplete])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -835,7 +857,30 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
 
           // Drawing mode: add vertex to polygon
           if (isDrawingRef.current) {
-            setPolygonVertices(prev => [...prev, latLon])
+            setPolygonVertices(prev => {
+              // Maximum 4 vertices
+              if (prev.length >= 4) {
+                console.log('[GlobeViewer] Maximum 4 vertices reached, ignoring click')
+                return prev
+              }
+
+              const newVertices = [...prev, latLon]
+              console.log(`[GlobeViewer] Added vertex ${newVertices.length} at (${latLon.lat.toFixed(4)}, ${latLon.lon.toFixed(4)})`)
+
+              // Auto-complete when 4th vertex is added
+              if (newVertices.length === 4) {
+                console.log('[GlobeViewer] Auto-completing polygon with 4 vertices')
+                setTimeout(() => {
+                  setCompletedPolygon(newVertices) // Keep the polygon highlighted
+                  onPolygonCompleteRef.current?.(newVertices)
+                  setPolygonVertices([])
+                  setIsDrawing(false)
+                  isDrawingRef.current = false
+                }, 100) // Small delay to allow visual feedback
+              }
+
+              return newVertices
+            })
             return
           }
         }
@@ -892,9 +937,44 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Visualize polygon as vertices are added
+  // Helper to create text sprite for vertex numbers
+  const createTextSprite = (text: string, backgroundColor: string, textColor: string): THREE.Sprite => {
+    const canvas = document.createElement('canvas')
+    const context = canvas.getContext('2d')!
+    canvas.width = 128
+    canvas.height = 128
+
+    // Draw background circle
+    context.fillStyle = backgroundColor
+    context.beginPath()
+    context.arc(64, 64, 60, 0, Math.PI * 2)
+    context.fill()
+
+    // Draw text
+    context.fillStyle = textColor
+    context.font = 'bold 80px Arial'
+    context.textAlign = 'center'
+    context.textBaseline = 'middle'
+    context.fillText(text, 64, 64)
+
+    const texture = new THREE.CanvasTexture(canvas)
+    texture.needsUpdate = true
+
+    const material = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false, // Always show on top
+      depthWrite: false
+    })
+    const sprite = new THREE.Sprite(material)
+    sprite.scale.set(0.025, 0.025, 1) // 50% smaller for better proportions
+
+    return sprite
+  }
+
+  // Visualize polygon (both drawing and completed)
   useEffect(() => {
-    if (!sceneRef.current || polygonVertices.length === 0) return
+    if (!sceneRef.current) return
 
     // Clear existing visualization
     clearPolygonVisualization()
@@ -905,47 +985,104 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
 
     const radius = 1.004 // Slightly above globe surface
 
-    // Draw lines connecting vertices
-    if (polygonVertices.length >= 2) {
-      const points: THREE.Vector3[] = []
+    // Visualize completed polygon (if exists)
+    if (completedPolygon && completedPolygon.length >= 3) {
+      // Draw filled polygon for completed AOI
+      const points: THREE.Vector3[] = completedPolygon.map(vertex =>
+        latLonToPoint3D(vertex, radius)
+      )
+      points.push(latLonToPoint3D(completedPolygon[0], radius)) // Close the loop
 
-      polygonVertices.forEach(vertex => {
-        points.push(latLonToPoint3D(vertex, radius))
-      })
-
-      // Close the polygon if we have 3+ vertices
-      if (polygonVertices.length >= 3) {
-        points.push(latLonToPoint3D(polygonVertices[0], radius))
-      }
-
-      const geometry = new THREE.BufferGeometry().setFromPoints(points)
-      const material = new THREE.LineBasicMaterial({
-        color: 0xff0000,
-        linewidth: 2,
+      // Add polygon outline
+      const lineGeometry = new THREE.BufferGeometry().setFromPoints(points)
+      const lineMaterial = new THREE.LineBasicMaterial({
+        color: 0xffff00, // Yellow
+        linewidth: 3,
         transparent: true,
-        opacity: 0.8
+        opacity: 1.0
+      })
+      const line = new THREE.Line(lineGeometry, lineMaterial)
+      polygonGroup.add(line)
+
+      // Add numbered vertex markers for completed polygon
+      completedPolygon.forEach((vertex, index) => {
+        const position = latLonToPoint3D(vertex, radius)
+
+        // Yellow sphere marker
+        const sphereGeometry = new THREE.SphereGeometry(0.01, 16, 16)
+        const sphereMaterial = new THREE.MeshBasicMaterial({ color: 0xffff00 })
+        const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial)
+        sphere.position.copy(position)
+        polygonGroup.add(sphere)
+
+        // Add number sprite - offset outward from globe for visibility
+        const numberSprite = createTextSprite((index + 1).toString(), '#ffff00', '#000000')
+        const offsetPosition = position.clone().multiplyScalar(1.02) // Move outward from globe
+        numberSprite.position.copy(offsetPosition)
+        polygonGroup.add(numberSprite)
       })
 
-      const line = new THREE.Line(geometry, material)
-      polygonGroup.add(line)
+      console.log(`[GlobeViewer] Visualizing completed polygon with ${completedPolygon.length} vertices`)
     }
 
-    // Draw vertex markers
-    polygonVertices.forEach(vertex => {
-      const position = latLonToPoint3D(vertex, radius)
-      const sphereGeometry = new THREE.SphereGeometry(0.01, 8, 8)
-      const sphereMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 })
-      const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial)
-      sphere.position.copy(position)
-      polygonGroup.add(sphere)
-    })
+    // Visualize drawing vertices (if any)
+    if (polygonVertices.length > 0) {
+      // Draw lines connecting vertices
+      if (polygonVertices.length >= 2) {
+        const points: THREE.Vector3[] = []
 
-    sceneRef.current.add(polygonGroup)
+        polygonVertices.forEach(vertex => {
+          points.push(latLonToPoint3D(vertex, radius))
+        })
+
+        // Close the polygon if we have 3+ vertices
+        if (polygonVertices.length >= 3) {
+          points.push(latLonToPoint3D(polygonVertices[0], radius))
+        }
+
+        const geometry = new THREE.BufferGeometry().setFromPoints(points)
+        const material = new THREE.LineBasicMaterial({
+          color: 0xffff00, // Yellow during drawing
+          linewidth: 2,
+          transparent: true,
+          opacity: 0.8
+        })
+
+        const line = new THREE.Line(geometry, material)
+        polygonGroup.add(line)
+      }
+
+      // Draw numbered vertex markers
+      polygonVertices.forEach((vertex, index) => {
+        const position = latLonToPoint3D(vertex, radius)
+
+        // Different color for first vertex (green) vs others (red)
+        const color = index === 0 ? 0x00ff00 : 0xff0000
+        const bgColor = index === 0 ? '#00ff00' : '#ff0000'
+        const sphereGeometry = new THREE.SphereGeometry(0.01, 16, 16)
+        const sphereMaterial = new THREE.MeshBasicMaterial({ color })
+        const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial)
+        sphere.position.copy(position)
+        polygonGroup.add(sphere)
+
+        // Add number sprite - offset outward from globe for visibility
+        const numberSprite = createTextSprite((index + 1).toString(), bgColor, '#ffffff')
+        const offsetPosition = position.clone().multiplyScalar(1.02) // Move outward from globe
+        numberSprite.position.copy(offsetPosition)
+        polygonGroup.add(numberSprite)
+      })
+
+      console.log(`[GlobeViewer] Visualizing ${polygonVertices.length} drawing vertices`)
+    }
+
+    if (polygonGroup.children.length > 0) {
+      sceneRef.current.add(polygonGroup)
+    }
 
     return () => {
       clearPolygonVisualization()
     }
-  }, [polygonVertices])
+  }, [polygonVertices, completedPolygon])
 
   // Load satellite 3D model
   useEffect(() => {

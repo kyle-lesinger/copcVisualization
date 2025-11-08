@@ -137,6 +137,15 @@ function App() {
     setCurrentPosition({ lat, lon })
   }
 
+  const handleViewModeChange = (mode: ViewMode) => {
+    // Clear AOI selection when switching between views
+    if (mode !== viewMode) {
+      console.log(`[App] Switching view mode from ${viewMode} to ${mode}, clearing AOI`)
+      handleClearAOI()
+    }
+    setViewMode(mode)
+  }
+
   const handleHeightFilterChange = (updates: Partial<HeightFilter>) => {
     setHeightFilter(prev => ({ ...prev, ...updates }))
   }
@@ -227,7 +236,7 @@ function App() {
         pointSize={pointSize}
         onPointSizeChange={setPointSize}
         viewMode={viewMode}
-        onViewModeChange={setViewMode}
+        onViewModeChange={handleViewModeChange}
         dataRange={dataRange}
         globalDataRange={globalDataRange}
         heightFilter={heightFilter}

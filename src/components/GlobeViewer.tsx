@@ -26,10 +26,13 @@ interface GlobeViewerProps {
   onCurrentGpsTime?: (gpsTime: number) => void
   onCurrentPosition?: (lat: number, lon: number) => void
   initialCameraState?: { distance: number, target: { lon: number, lat: number } }
+  isGroundModeActive?: boolean
+  groundCameraPosition?: { lat: number, lon: number } | null
+  onGroundCameraPositionSet?: (lat: number, lon: number) => void
 }
 
 const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref) => {
-  const { onClick, onPolygonComplete, onAnimationProgress, onCurrentGpsTime, onCurrentPosition, initialCameraState } = props
+  const { onClick, onPolygonComplete, onAnimationProgress, onCurrentGpsTime, onCurrentPosition, initialCameraState, isGroundModeActive = false, groundCameraPosition: groundCameraPositionProp, onGroundCameraPositionSet } = props
   const containerRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null)
@@ -46,6 +49,9 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
   const isDrawingRef = useRef(false)
   const [polygonVertices, setPolygonVertices] = useState<LatLon[]>([])
   const polygonGroupRef = useRef<THREE.Group | null>(null)
+
+  // Ground mode marker ref
+  const groundMarkerRef = useRef<THREE.Group | null>(null)
 
   // Helper to convert 3D point to lat/lon
   const point3DToLatLon = (point: THREE.Vector3): LatLon => {
@@ -145,6 +151,62 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
 
     sceneRef.current?.add(laserGroup)
     laserBeamRef.current = laserGroup
+  }
+
+  // Clear ground camera marker
+  const clearGroundMarker = () => {
+    if (groundMarkerRef.current && sceneRef.current) {
+      groundMarkerRef.current.children.forEach(child => {
+        if (child instanceof THREE.Mesh) {
+          child.geometry.dispose()
+          if (child.material instanceof THREE.Material) {
+            child.material.dispose()
+          }
+        }
+      })
+      sceneRef.current.remove(groundMarkerRef.current)
+      groundMarkerRef.current = null
+    }
+  }
+
+  // Create ground camera marker at specified position
+  const createGroundMarker = (lat: number, lon: number) => {
+    clearGroundMarker()
+
+    const markerGroup = new THREE.Group()
+    const position = latLonToPoint3D({ lat, lon }, 1.01) // Slightly above globe surface
+
+    // Create a cone marker pointing up
+    const coneGeometry = new THREE.ConeGeometry(0.02, 0.05, 8)
+    const coneMaterial = new THREE.MeshBasicMaterial({
+      color: 0xff0000,
+      transparent: true,
+      opacity: 0.9
+    })
+    const cone = new THREE.Mesh(coneGeometry, coneMaterial)
+
+    // Orient the cone to point away from globe center (up)
+    cone.position.copy(position)
+    cone.quaternion.setFromUnitVectors(
+      new THREE.Vector3(0, 1, 0),
+      position.clone().normalize()
+    )
+
+    markerGroup.add(cone)
+
+    // Add a small sphere at the base
+    const sphereGeometry = new THREE.SphereGeometry(0.015, 16, 16)
+    const sphereMaterial = new THREE.MeshBasicMaterial({
+      color: 0xff0000,
+      transparent: true,
+      opacity: 0.9
+    })
+    const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial)
+    sphere.position.copy(position)
+    markerGroup.add(sphere)
+
+    sceneRef.current?.add(markerGroup)
+    groundMarkerRef.current = markerGroup
   }
 
   // Expose methods to parent
@@ -570,7 +632,7 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
     }
     window.addEventListener('resize', handleResize)
 
-    // Handle click for raycasting and polygon drawing
+    // Handle click for raycasting, polygon drawing, and ground mode
     const handleClick = (event: MouseEvent) => {
       const rect = renderer.domElement.getBoundingClientRect()
       const mouse = new THREE.Vector2()
@@ -583,13 +645,21 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       if (globeRef.current) {
         const intersects = raycasterRef.current.intersectObject(globeRef.current)
 
-        if (intersects.length > 0 && isDrawingRef.current) {
-          // Drawing mode: add vertex to polygon
+        if (intersects.length > 0) {
           const point = intersects[0].point
           const latLon = point3DToLatLon(point)
 
-          setPolygonVertices(prev => [...prev, latLon])
-          return
+          // Ground mode: place camera marker
+          if (isGroundModeActive && onGroundCameraPositionSet) {
+            onGroundCameraPositionSet(latLon.lat, latLon.lon)
+            return
+          }
+
+          // Drawing mode: add vertex to polygon
+          if (isDrawingRef.current) {
+            setPolygonVertices(prev => [...prev, latLon])
+            return
+          }
         }
       }
 
@@ -754,6 +824,20 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       }
     }
   }, [])
+
+  // Manage ground camera marker
+  useEffect(() => {
+    if (groundCameraPositionProp && sceneRef.current) {
+      createGroundMarker(groundCameraPositionProp.lat, groundCameraPositionProp.lon)
+    } else {
+      clearGroundMarker()
+    }
+
+    // Cleanup on unmount
+    return () => {
+      clearGroundMarker()
+    }
+  }, [groundCameraPositionProp])
 
   return (
     <div

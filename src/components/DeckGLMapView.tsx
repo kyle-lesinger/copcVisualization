@@ -28,6 +28,9 @@ interface DeckGLMapViewProps {
   onCurrentGpsTime?: (gpsTime: number) => void
   onCurrentPosition?: (lat: number, lon: number) => void
   animationProgress?: number // For progressive point rendering during satellite animation
+  isGroundModeActive?: boolean
+  groundCameraPosition?: { lat: number, lon: number } | null
+  onGroundCameraPositionSet?: (lat: number, lon: number) => void
 }
 
 export interface DeckGLMapViewHandle {
@@ -41,7 +44,7 @@ export interface DeckGLMapViewHandle {
 }
 
 const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
-  ({ center, zoom = 5, data, colorMode, colormap, pointSize, dataVersion, isDrawingAOI, aoiPolygon, onPolygonComplete, onAnimationProgress, onCurrentGpsTime, onCurrentPosition, animationProgress = 1.0 }, ref) => {
+  ({ center, zoom = 5, data, colorMode, colormap, pointSize, dataVersion, isDrawingAOI, aoiPolygon, onPolygonComplete, onAnimationProgress, onCurrentGpsTime, onCurrentPosition, animationProgress = 1.0, isGroundModeActive, groundCameraPosition, onGroundCameraPositionSet }, ref) => {
     const mapContainer = useRef<HTMLDivElement>(null)
     const mapRef = useRef<maplibregl.Map | null>(null)
     const deckOverlayRef = useRef<MapboxOverlay | null>(null)
@@ -52,6 +55,7 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
     const [laserLine, setLaserLine] = useState<[[number, number, number], [number, number, number]] | null>(null)
     const [satelliteIcon, setSatelliteIcon] = useState<string | null>(null)
     const lastCenterPropRef = useRef<[number, number] | null>(null)
+    const groundMarkerRef = useRef<maplibregl.Marker | null>(null)
 
     useImperativeHandle(ref, () => ({
       setCenter: (lng: number, lat: number) => {
@@ -286,7 +290,18 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
         }
       })
 
+      // Handle ground mode clicks
+      const handleMapClick = (e: maplibregl.MapMouseEvent) => {
+        // Only handle clicks when ground mode is active and not in drawing mode
+        if (isGroundModeActive && !isDrawing && onGroundCameraPositionSet) {
+          const { lng, lat } = e.lngLat
+          onGroundCameraPositionSet(lat, lng)
+        }
+      }
+      map.on('click', handleMapClick)
+
       return () => {
+        map.off('click', handleMapClick)
         map.remove()
       }
     }, [])
@@ -528,6 +543,48 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
 
       deckOverlayRef.current.setProps({ layers })
     }, [data, colorMode, colormap, pointSize, dataVersion, currentZoom, animationProgress, laserLine, satellitePosition, satelliteIcon])
+
+    // Manage ground camera marker
+    useEffect(() => {
+      if (!mapRef.current) return
+
+      // Remove existing marker if present
+      if (groundMarkerRef.current) {
+        groundMarkerRef.current.remove()
+        groundMarkerRef.current = null
+      }
+
+      // Create new marker if position is set
+      if (groundCameraPosition) {
+        // Create a custom marker element
+        const el = document.createElement('div')
+        el.style.width = '30px'
+        el.style.height = '30px'
+        el.style.cursor = 'pointer'
+
+        // Create an SVG for the marker (red pin/location icon)
+        el.innerHTML = `
+          <svg width="30" height="30" viewBox="0 0 30 30" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="15" cy="15" r="8" fill="#ff0000" stroke="#ffffff" stroke-width="2" opacity="0.9"/>
+            <circle cx="15" cy="15" r="3" fill="#ffffff" opacity="0.9"/>
+          </svg>
+        `
+
+        const marker = new maplibregl.Marker({ element: el, anchor: 'center' })
+          .setLngLat([groundCameraPosition.lon, groundCameraPosition.lat])
+          .addTo(mapRef.current)
+
+        groundMarkerRef.current = marker
+      }
+
+      // Cleanup on unmount or position change
+      return () => {
+        if (groundMarkerRef.current) {
+          groundMarkerRef.current.remove()
+          groundMarkerRef.current = null
+        }
+      }
+    }, [groundCameraPosition])
 
     return <div ref={mapContainer} className="map-background" />
   }

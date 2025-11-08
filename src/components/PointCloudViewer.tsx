@@ -34,9 +34,12 @@ interface PointCloudViewerProps {
   onCurrentGpsTimeUpdate?: (gpsTime: number | null) => void
   onCurrentPositionUpdate?: (lat: number, lon: number) => void
   heightFilter?: HeightFilter
+  isGroundModeActive?: boolean
+  groundCameraPosition?: { lat: number, lon: number } | null
+  onGroundCameraPositionSet?: (lat: number, lon: number) => void
 }
 
-export default function PointCloudViewer({ files, colorMode, colormap, pointSize, viewMode, onGlobalDataRangeUpdate, onDataRangeUpdate, aoiPolygon, showScatterPlotTrigger, onAOIDataReady, onPolygonUpdate, isDrawingAOI, onAnimateSatelliteTrigger, onFirstPointUpdate, onLastPointUpdate, onCurrentGpsTimeUpdate, onCurrentPositionUpdate, heightFilter }: PointCloudViewerProps) {
+export default function PointCloudViewer({ files, colorMode, colormap, pointSize, viewMode, onGlobalDataRangeUpdate, onDataRangeUpdate, aoiPolygon, showScatterPlotTrigger, onAOIDataReady, onPolygonUpdate, isDrawingAOI, onAnimateSatelliteTrigger, onFirstPointUpdate, onLastPointUpdate, onCurrentGpsTimeUpdate, onCurrentPositionUpdate, heightFilter, isGroundModeActive, groundCameraPosition, onGroundCameraPositionSet }: PointCloudViewerProps) {
   const globeRef = useRef<GlobeViewerHandle>(null)
   const deckMapRef = useRef<DeckGLMapViewHandle>(null)
   const pointCloudsRef = useRef<THREE.Points[]>([])
@@ -65,6 +68,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
   })
   const [mapCenter, setMapCenter] = useState<[number, number]>([0, 0])
   const [mapZoom, setMapZoom] = useState<number>(5)
+  const [initialCameraDistance, setInitialCameraDistance] = useState<number>(2.5) // Calculated based on data extent
   const [dataLoaded, setDataLoaded] = useState(false)
   const [dataVersion, setDataVersion] = useState(0) // Increment to trigger DeckGLMapView update
   const [mapViewKey, setMapViewKey] = useState(0) // Increment to force DeckGLMapView remount
@@ -72,6 +76,8 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
   const last3DCameraStateRef = useRef<{ distance: number, target: { lon: number, lat: number } } | null>(null)
   const lastColorSettingsRef = useRef<{ colorMode: ColorMode, colormap: Colormap } | null>(null)
   const lastViewModeRef = useRef<ViewMode>(viewMode)
+  const initialCameraSetRef = useRef(false) // Track if initial camera has been set after data loads
+  const heightFilterRebuildInitializedRef = useRef(false) // Track if height filter rebuild effect has run at least once
 
   // Store decimated data per point cloud for fast color updates
   const decimatedDataRef = useRef<Array<{
@@ -142,6 +148,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
   const [firstPoint, setFirstPoint] = useState<{ lon: number, lat: number, alt: number, gpsTime: number } | null>(null)
   const [lastPoint, setLastPoint] = useState<{ lon: number, lat: number, alt: number, gpsTime: number } | null>(null)
   const [animationProgress, setAnimationProgress] = useState(1) // Start at 1 to show all points initially
+  const [pointCloudVersion, setPointCloudVersion] = useState(0) // Increment when point clouds change
 
   // Get decimation factor based on camera distance from globe center
   const getDecimationForDistance = useCallback((distance: number): number => {
@@ -152,7 +159,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
 
     if (distance > 5.0) return 500      // Very far: ~9,300 points
     if (distance > 3.5) return 200      // Far: ~23,000 points
-    if (distance > 2.5) return 50       // Medium: ~93,000 points
+    if (distance > 3.0) return 50       // Medium: ~93,000 points
     if (distance > 1.8) return 10       // Close: ~465,000 points
     if (distance > 1.3) return 2        // Very close: ~2.3M points
     return 1                             // At surface: All points (~4.6M)
@@ -225,6 +232,11 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
   // Update globe LOD based on camera distance
   const updateGlobeLOD = useCallback(() => {
     if (!globeRef.current || dataRef.current.length === 0 || viewMode === '2d') return
+
+    // Don't run LOD updates until after initial camera positioning is complete
+    if (!initialCameraSetRef.current) {
+      return
+    }
 
     const camera = globeRef.current.getCamera()
     const scene = globeRef.current.getScene()
@@ -346,6 +358,9 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
           const geometry = new THREE.BufferGeometry()
           geometry.setAttribute('position', new THREE.BufferAttribute(globePositions, 3))
           geometry.setAttribute('color', new THREE.BufferAttribute(decimatedColors, 3, true))
+
+          // Set drawRange to show all points initially (progressive rendering effect will update this)
+          geometry.setDrawRange(0, globePositions.length / 3)
 
           const material = new THREE.PointsMaterial({
             size: pointSize * 0.002,
@@ -634,7 +649,18 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
         }
         const centerLng = (minLng + maxLng) / 2
         const centerLat = (minLat + maxLat) / 2
+
+        // Calculate extent in degrees
+        const extentLng = maxLng - minLng
+        const extentLat = maxLat - minLat
+
+        // Use fixed distance of 1.8 for best detail (decimation 1:2, ~2.3M points)
+        const calculatedDistance = 1.8
+
+        console.log(`[PointCloudViewer] Data extent: ${extentLng.toFixed(2)}° lng × ${extentLat.toFixed(2)}° lat, using camera distance: ${calculatedDistance.toFixed(2)}`)
+
         setMapCenter([centerLng, centerLat])
+        setInitialCameraDistance(calculatedDistance)
 
         // Create point clouds for each file
         let totalPoints = 0
@@ -643,8 +669,8 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
           // This prevents reloading data every time the height filter changes
 
           // Distance-based decimation for globe view
-          // Start with medium detail (1:10), will be updated based on camera distance
-          const decimation = getDecimationForDistance(3.0) // Default camera distance
+          // Use calculated distance based on data extent
+          const decimation = getDecimationForDistance(calculatedDistance)
           const decimatedPositions: number[] = []
           const decimatedIntensities: number[] = []
           const decimatedClassifications: number[] = []
@@ -720,6 +746,9 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
           geometry.setAttribute('position', new THREE.BufferAttribute(globePositions, 3))
           geometry.setAttribute('color', new THREE.BufferAttribute(decimatedColors, 3, true))
 
+          // Set drawRange to show all points initially (progressive rendering effect will update this)
+          geometry.setDrawRange(0, globePositions.length / 3)
+
           const material = new THREE.PointsMaterial({
             size: pointSize * 0.002, // Scale for globe view
             vertexColors: true,
@@ -736,10 +765,12 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
         })
 
         setStats({ points: totalPoints, files: allData.length })
+        console.log(`[PointCloudViewer] 🚀 Initial load complete: Added ${pointCloudsRef.current.length} point clouds with ${totalPoints.toLocaleString()} total points to scene`)
         setLoading(false)
         setDataLoaded(true)
-        // Increment dataVersion to trigger DeckGLMapView update with new data
+        // Increment versions to trigger updates
         setDataVersion(prev => prev + 1)
+        setPointCloudVersion(prev => prev + 1) // Trigger progressive rendering effect
       })
       .catch((err) => {
         console.error('Error loading COPC files:', err)
@@ -748,12 +779,52 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
       })
   }, [files, pointSize, onGlobalDataRangeUpdate, onDataRangeUpdate])
 
+  // Reposition camera to data center when data first loads
+  useEffect(() => {
+    if (!dataLoaded || !globeRef.current || viewMode === '2d' || initialCameraSetRef.current) return
+
+    // Check if mapCenter has been updated from default (0, 0)
+    if (mapCenter[0] !== 0 || mapCenter[1] !== 0) {
+      const startDistance = initialCameraDistance
+      const target = { lon: mapCenter[0], lat: mapCenter[1] }
+
+      console.log(`[PointCloudViewer] 📍 Repositioning camera to data center: (${target.lon.toFixed(4)}, ${target.lat.toFixed(4)}) at distance ${startDistance.toFixed(2)}`)
+      console.log(`[PointCloudViewer] 📍 Point clouds in scene before reposition: ${pointCloudsRef.current.length}`)
+
+      globeRef.current.setCameraState(startDistance, target)
+
+      // Update tracked camera state
+      last3DCameraStateRef.current = { distance: startDistance, target }
+      lastCameraDistanceRef.current = startDistance
+
+      console.log(`[PointCloudViewer] 📍 Point clouds in scene after reposition: ${pointCloudsRef.current.length}`)
+
+      initialCameraSetRef.current = true
+    }
+  }, [dataLoaded, mapCenter, viewMode, initialCameraDistance])
+
   // Rebuild point clouds when height filter changes
   useEffect(() => {
     if (!globeRef.current || dataRef.current.length === 0 || viewMode === '2d') return
 
+    // IMPORTANT: Don't rebuild until after initial camera positioning is complete
+    // This prevents destroying the correctly decimated initial point clouds
+    if (!initialCameraSetRef.current) {
+      console.log(`[PointCloudViewer] ⏸️  Skipping height filter rebuild - waiting for initial camera positioning`)
+      return
+    }
+
+    // Skip on first execution (initial mount) - only rebuild when user changes settings
+    if (!heightFilterRebuildInitializedRef.current) {
+      console.log(`[PointCloudViewer] ⏸️  Skipping height filter rebuild - first execution (initial mount)`)
+      heightFilterRebuildInitializedRef.current = true
+      return
+    }
+
     const scene = globeRef.current.getScene()
     if (!scene) return
+
+    console.log(`[PointCloudViewer] 🔄 Height filter rebuild starting... Current point clouds in scene: ${pointCloudsRef.current.length}`)
 
     // Remove existing point clouds
     pointCloudsRef.current.forEach(pc => {
@@ -809,6 +880,9 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
       geometry.setAttribute('position', new THREE.BufferAttribute(globePositions, 3))
       geometry.setAttribute('color', new THREE.BufferAttribute(new Uint8Array(decimatedColors), 3, true))
 
+      // Set drawRange to show all points initially (progressive rendering effect will update this)
+      geometry.setDrawRange(0, globePositions.length / 3)
+
       const material = new THREE.PointsMaterial({
         size: pointSize * 0.002,
         vertexColors: true,
@@ -826,6 +900,8 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
 
     setStats(prev => ({ ...prev, points: totalPoints }))
 
+    console.log(`[PointCloudViewer] ✅ Height filter rebuild complete: Added ${pointCloudsRef.current.length} point clouds with ${totalPoints.toLocaleString()} total points to scene`)
+
     // Update lastCameraDistanceRef to reflect the distance at which LOD was rebuilt
     const camera = globeRef.current.getCamera()
     if (camera) {
@@ -833,9 +909,10 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
       console.log(`[PointCloudViewer] Height filter change: Updated lastCameraDistanceRef to ${lastCameraDistanceRef.current.toFixed(2)}`)
     }
 
-    // Increment dataVersion to trigger DeckGLMapView update
+    // Increment versions to trigger updates
     setDataVersion(prev => prev + 1)
-  }, [heightFilter, filterPointsByHeight, pointSize, viewMode, getDecimationForDistance, dataLoaded])
+    setPointCloudVersion(prev => prev + 1) // Trigger progressive rendering effect
+  }, [heightFilter, filterPointsByHeight, pointSize, viewMode, getDecimationForDistance])
 
   // Update colors when color mode or colormap changes
   useEffect(() => {
@@ -945,6 +1022,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
 
   // Handle animation progress callback for progressive point cloud rendering
   const handleAnimationProgress = useCallback((progress: number) => {
+    console.log(`[PointCloudViewer] 🎭 Animation progress changed: ${progress.toFixed(3)} (${(progress * 100).toFixed(1)}%)`)
     setAnimationProgress(progress)
   }, [])
 
@@ -1132,12 +1210,23 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
   useEffect(() => {
     if (viewMode === '2d') return // Only apply in globe view
 
+    console.log(`[PointCloudViewer] 🎬 Progressive rendering: animationProgress=${animationProgress.toFixed(3)}, pointClouds=${pointCloudsRef.current.length}, version=${pointCloudVersion}`)
+
+    let totalVisiblePoints = 0
+    let totalAvailablePoints = 0
+
     pointCloudsRef.current.forEach((pointCloud, index) => {
-      if (!pointCloud.geometry) return
+      if (!pointCloud.geometry) {
+        console.log(`[PointCloudViewer] ⚠️  Point cloud ${index} has no geometry`)
+        return
+      }
 
       // Use the actual count of points in the displayed geometry (after decimation)
       const positionAttribute = pointCloud.geometry.getAttribute('position')
-      if (!positionAttribute) return
+      if (!positionAttribute) {
+        console.log(`[PointCloudViewer] ⚠️  Point cloud ${index} has no position attribute`)
+        return
+      }
 
       const totalPoints = positionAttribute.count
 
@@ -1149,11 +1238,16 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
       // This creates the curtain effect as satellite moves
       pointCloud.geometry.setDrawRange(0, visiblePointCount)
 
-      if (index === 0 && animationProgress > 0 && animationProgress < 1) {
-        console.log(`[PointCloudViewer] Animation progress: ${(animationProgress * 100).toFixed(1)}%, showing ${visiblePointCount}/${totalPoints} decimated points`)
+      totalAvailablePoints += totalPoints
+      totalVisiblePoints += visiblePointCount
+
+      if (index === 0) {
+        console.log(`[PointCloudViewer] 👁️  Point cloud ${index}: drawRange set to ${visiblePointCount}/${totalPoints} (${(animationProgress * 100).toFixed(1)}%)`)
       }
     })
-  }, [animationProgress, viewMode])
+
+    console.log(`[PointCloudViewer] 📊 Total visible: ${totalVisiblePoints.toLocaleString()}/${totalAvailablePoints.toLocaleString()} points across ${pointCloudsRef.current.length} clouds`)
+  }, [animationProgress, viewMode, pointCloudVersion])
 
   // Update ref with current 2D map state when it changes
   useEffect(() => {
@@ -1194,28 +1288,27 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
       return Math.pow(2, (10 - zoom) / 3)
     }
 
-    // Try to get from ref first (captured before switching)
-    let center: [number, number] = mapCenter
-    let zoom: number = mapZoom
-
+    // Only use specific camera state when switching from 2D view
     if (last2DMapStateRef.current) {
-      center = last2DMapStateRef.current.center
-      zoom = last2DMapStateRef.current.zoom
+      const center = last2DMapStateRef.current.center
+      const zoom = last2DMapStateRef.current.zoom
+      const distance = zoomToDistance(zoom)
+      const target = { lon: center[0], lat: center[1] }
+
       console.log(`[PointCloudViewer] Using captured 2D map state from ref: center (${center[0].toFixed(4)}, ${center[1].toFixed(4)}), zoom ${zoom.toFixed(4)}`)
-    } else {
-      console.log(`[PointCloudViewer] Using current map state values: center (${center[0].toFixed(4)}, ${center[1].toFixed(4)}), zoom ${zoom.toFixed(4)}`)
+      console.log(`[PointCloudViewer] 2D→3D: zoom ${zoom.toFixed(4)} → distance ${distance.toFixed(4)}, target (${target.lon.toFixed(4)}, ${target.lat.toFixed(4)})`)
+
+      // IMPORTANT: Update the tracked 3D camera ref so it's available for the next switch to 2D
+      last3DCameraStateRef.current = { distance, target }
+      console.log(`[PointCloudViewer] Updated last3DCameraStateRef for future 2D switches`)
+
+      return { distance, target }
     }
 
-    const distance = zoomToDistance(zoom)
-    const target = { lon: center[0], lat: center[1] }
-
-    console.log(`[PointCloudViewer] 2D→3D: zoom ${zoom.toFixed(4)} → distance ${distance.toFixed(4)}, target (${target.lon.toFixed(4)}, ${target.lat.toFixed(4)})`)
-
-    // IMPORTANT: Update the tracked 3D camera ref so it's available for the next switch to 2D
-    last3DCameraStateRef.current = { distance, target }
-    console.log(`[PointCloudViewer] Updated last3DCameraStateRef for future 2D switches`)
-
-    return { distance, target }
+    // Otherwise return undefined to use default camera position
+    // Camera will be repositioned when data loads via the effect
+    console.log(`[PointCloudViewer] No 2D state, using default camera position (will reposition after data loads)`)
+    return undefined
   }, [viewMode, mapCenter, mapZoom])
 
   return (
@@ -1238,6 +1331,9 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
           onCurrentGpsTime={handleCurrentGpsTime}
           onCurrentPosition={handleCurrentPosition}
           animationProgress={animationProgress}
+          isGroundModeActive={isGroundModeActive}
+          groundCameraPosition={groundCameraPosition}
+          onGroundCameraPositionSet={onGroundCameraPositionSet}
         />
       ) : (
         <GlobeViewer
@@ -1247,6 +1343,9 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
           onCurrentGpsTime={handleCurrentGpsTime}
           onCurrentPosition={handleCurrentPosition}
           initialCameraState={initialCameraState}
+          isGroundModeActive={isGroundModeActive}
+          groundCameraPosition={groundCameraPosition}
+          onGroundCameraPositionSet={onGroundCameraPositionSet}
         />
       )}
 

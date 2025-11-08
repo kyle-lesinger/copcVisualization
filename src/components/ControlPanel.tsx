@@ -33,6 +33,10 @@ interface ControlPanelProps {
   currentGpsTime?: number | null
   currentPosition?: { lat: number, lon: number } | null
   onAnimateSatellite?: () => void
+  // Ground mode controls
+  isGroundModeActive: boolean
+  onToggleGroundMode: () => void
+  groundCameraPosition: { lat: number, lon: number } | null
 }
 
 export default function ControlPanel({
@@ -60,7 +64,10 @@ export default function ControlPanel({
   lastPoint,
   currentGpsTime,
   currentPosition,
-  onAnimateSatellite
+  onAnimateSatellite,
+  isGroundModeActive,
+  onToggleGroundMode,
+  groundCameraPosition
 }: ControlPanelProps) {
   const colormaps: Colormap[] = ['viridis', 'plasma', 'turbo', 'coolwarm', 'jet', 'grayscale']
 
@@ -135,31 +142,23 @@ export default function ControlPanel({
         </button>
       </div>
 
-      <div className="data-info">
-        <h4>Data Info:</h4>
-        <p>
-          <strong>Source:</strong> CALIPSO Level 1<br />
-          <strong>Date:</strong> 2023-06-30<br />
-          <strong>Format:</strong> COPC (LAZ 1.4)
-        </p>
-      </div>
-
-      <div className="data-range-info">
-        <h4>Data Ranges:</h4>
-        {dataRange.elevation && (
-          <p>
-            <strong>Elevation:</strong><br />
-            {dataRange.elevation[0].toFixed(2)} to {dataRange.elevation[1].toFixed(2)} km
+      <div className="control-group">
+        <label className="control-label">Ground View</label>
+        <button
+          className={`control-button ${isGroundModeActive ? 'active' : ''}`}
+          onClick={onToggleGroundMode}
+        >
+          {isGroundModeActive ? '✓ Ground Mode Active' : '🏔️ Activate Ground Mode'}
+        </button>
+        {isGroundModeActive && !groundCameraPosition && (
+          <p className="text-muted" style={{ fontSize: '12px', marginTop: '8px' }}>
+            Click on globe/map to place camera
           </p>
         )}
-        {dataRange.intensity && (
-          <p>
-            <strong>Intensity (532nm):</strong><br />
-            {dataRange.intensity[0].toFixed(3)} to {dataRange.intensity[1].toFixed(3)} km⁻¹·sr⁻¹
+        {isGroundModeActive && groundCameraPosition && (
+          <p className="text-muted" style={{ fontSize: '12px', marginTop: '8px' }}>
+            Camera at {Math.abs(groundCameraPosition.lat).toFixed(4)}°{groundCameraPosition.lat < 0 ? 'S' : 'N'}, {Math.abs(groundCameraPosition.lon).toFixed(4)}°{groundCameraPosition.lon > 0 ? 'E' : 'W'}
           </p>
-        )}
-        {!dataRange.elevation && !dataRange.intensity && (
-          <p className="text-muted">Loading data...</p>
         )}
       </div>
 

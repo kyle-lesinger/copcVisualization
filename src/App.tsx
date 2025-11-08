@@ -3,6 +3,7 @@ import PointCloudViewer from './components/PointCloudViewer'
 import FileSelector from './components/FileSelector'
 import ControlPanel from './components/ControlPanel'
 import ControlsInfo from './components/ControlsInfo'
+import DataInfo from './components/DataInfo'
 import { Colormap } from './utils/colormaps'
 import { LatLon } from './utils/aoiSelector'
 import './App.css'
@@ -82,6 +83,10 @@ function App() {
   // Track if height filter has been initialized to prevent overwriting user changes
   const [heightFilterInitialized, setHeightFilterInitialized] = useState(false)
 
+  // Ground mode state
+  const [isGroundModeActive, setIsGroundModeActive] = useState(false)
+  const [groundCameraPosition, setGroundCameraPosition] = useState<{ lat: number, lon: number } | null>(null)
+
   const handleFileModeChange = (mode: FileMode) => {
     setFileMode(mode)
     // Update selected files based on mode
@@ -144,6 +149,23 @@ function App() {
     }))
   }
 
+  const handleToggleGroundMode = () => {
+    setIsGroundModeActive(prev => !prev)
+    // Reset ground camera position when deactivating
+    if (isGroundModeActive) {
+      setGroundCameraPosition(null)
+    }
+  }
+
+  const handleGroundCameraPositionSet = (lat: number, lon: number) => {
+    setGroundCameraPosition({ lat, lon })
+  }
+
+  const handleExitGroundMode = () => {
+    setIsGroundModeActive(false)
+    setGroundCameraPosition(null)
+  }
+
   const handleGlobalDataRangeUpdate = useCallback((range: DataRange) => {
     // Set both global range (for validation) and current range (for display)
     setGlobalDataRange(range)
@@ -183,6 +205,9 @@ function App() {
         onCurrentGpsTimeUpdate={handleCurrentGpsTimeUpdate}
         onCurrentPositionUpdate={handleCurrentPositionUpdate}
         heightFilter={heightFilter}
+        isGroundModeActive={isGroundModeActive}
+        groundCameraPosition={groundCameraPosition}
+        onGroundCameraPositionSet={handleGroundCameraPositionSet}
       />
 
       <FileSelector
@@ -220,7 +245,12 @@ function App() {
         currentGpsTime={currentGpsTime}
         currentPosition={currentPosition}
         onAnimateSatellite={handleAnimateSatellite}
+        isGroundModeActive={isGroundModeActive}
+        onToggleGroundMode={handleToggleGroundMode}
+        groundCameraPosition={groundCameraPosition}
       />
+
+      <DataInfo dataRange={dataRange} />
 
       <ControlsInfo />
     </div>

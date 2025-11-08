@@ -667,15 +667,19 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
 
       console.log(`[DeckGLMapView] Ground mode transition triggered: bearing=${groundModeViewData.perpendicularBearing.toFixed(1)}°, distance=${groundModeViewData.distance.toFixed(2)}km`)
 
-      // Store current camera state before transitioning
-      const currentCenter = mapRef.current.getCenter()
-      preGroundModeCameraRef.current = {
-        center: [currentCenter.lng, currentCenter.lat],
-        zoom: mapRef.current.getZoom(),
-        bearing: mapRef.current.getBearing(),
-        pitch: mapRef.current.getPitch()
+      // Store current camera state ONLY on first ground mode activation (not on subsequent position changes)
+      if (!preGroundModeCameraRef.current) {
+        const currentCenter = mapRef.current.getCenter()
+        preGroundModeCameraRef.current = {
+          center: [currentCenter.lng, currentCenter.lat],
+          zoom: mapRef.current.getZoom(),
+          bearing: mapRef.current.getBearing(),
+          pitch: mapRef.current.getPitch()
+        }
+        console.log(`[DeckGLMapView] Saved INITIAL camera state before ground mode:`, preGroundModeCameraRef.current)
+      } else {
+        console.log(`[DeckGLMapView] Ground position changed, keeping original saved camera state`)
       }
-      console.log(`[DeckGLMapView] Saved camera state before ground mode:`, preGroundModeCameraRef.current)
 
       // Wait 500ms after marker placement, then animate camera
       const transitionTimeout = setTimeout(() => {

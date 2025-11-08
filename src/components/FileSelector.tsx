@@ -53,7 +53,7 @@ export default function FileSelector({
             checked={fileMode === 'tiled'}
             onChange={() => onFileModeChange('tiled')}
           />
-          Tiled (4 files)
+          Tiled
         </label>
       </div>
 

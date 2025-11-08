@@ -142,6 +142,13 @@ function App() {
     if (mode !== viewMode) {
       console.log(`[App] Switching view mode from ${viewMode} to ${mode}, clearing AOI`)
       handleClearAOI()
+
+      // Set colormap to jet and point size to 10 when switching to 2D mode
+      if (mode === '2d') {
+        console.log(`[App] Switching to 2D mode, setting colormap to jet and point size to 10`)
+        setColormap('jet')
+        setPointSize(10)
+      }
     }
     setViewMode(mode)
   }

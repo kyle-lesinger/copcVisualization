@@ -34,6 +34,22 @@ interface AOIScatterPlotProps {
 export default function AOIScatterPlot({ altitudes, intensities, pointCount, onClose }: AOIScatterPlotProps) {
   const chartRef = useRef(null)
 
+  // Calculate min/max for both axes with padding
+  // Using reduce() instead of spread operator to avoid stack overflow with large datasets
+  const minIntensity = intensities.length > 0 ? intensities.reduce((min, val) => Math.min(min, val), Infinity) : 0
+  const maxIntensity = intensities.length > 0 ? intensities.reduce((max, val) => Math.max(max, val), -Infinity) : 1
+  const minAltitude = altitudes.length > 0 ? altitudes.reduce((min, val) => Math.min(min, val), Infinity) : 0
+  const maxAltitude = altitudes.length > 0 ? altitudes.reduce((max, val) => Math.max(max, val), -Infinity) : 1
+
+  // Add 10% padding to the ranges for better visualization
+  const intensityPadding = (maxIntensity - minIntensity) * 0.1
+  const altitudePadding = (maxAltitude - minAltitude) * 0.1
+
+  const xMin = Math.max(0, minIntensity - intensityPadding)
+  const xMax = maxIntensity + intensityPadding
+  const yMin = minAltitude - altitudePadding
+  const yMax = maxAltitude + altitudePadding
+
   // Prepare data for Chart.js
   // X-axis: intensity, Y-axis: altitude
   const chartData = {
@@ -64,8 +80,8 @@ export default function AOIScatterPlot({ altitudes, intensities, pointCount, onC
             size: 14
           }
         },
-        min: 0,
-        max: 3.5
+        min: xMin,
+        max: xMax
       },
       y: {
         type: 'linear',
@@ -76,8 +92,8 @@ export default function AOIScatterPlot({ altitudes, intensities, pointCount, onC
             size: 14
           }
         },
-        min: -0.5,
-        max: 40
+        min: yMin,
+        max: yMax
       }
     },
     plugins: {

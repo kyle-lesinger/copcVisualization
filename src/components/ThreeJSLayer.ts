@@ -28,6 +28,8 @@ export class ThreeJSLayer implements maplibregl.CustomLayerInterface {
     translateZ: number
     scale: number
   }
+  private currentZoom: number = 0
+  private lastLODUpdate: number = 0
 
   constructor(id: string, options: ThreeJSLayerOptions) {
     this.id = id
@@ -71,53 +73,79 @@ export class ThreeJSLayer implements maplibregl.CustomLayerInterface {
     this.createPointClouds()
   }
 
+  /**
+   * Get optimal subsample rate based on current zoom level
+   */
+  private getSubsampleRate(): number {
+    const zoom = this.map?.getZoom() || 0
+
+    // More points at higher zoom levels
+    if (zoom < 4) return 1000      // ~460 points - far away
+    if (zoom < 6) return 500       // ~920 points
+    if (zoom < 8) return 200       // ~2,300 points
+    if (zoom < 10) return 100      // ~4,600 points
+    if (zoom < 12) return 50       // ~9,200 points
+    if (zoom < 14) return 20       // ~23,000 points
+    if (zoom < 16) return 10       // ~46,000 points
+    return 5                        // ~92,000 points - zoomed in close
+  }
+
   private createPointClouds() {
     if (!this.scene || this.options.data.length === 0) return
 
-    // Calculate data center for reference
-    const firstData = this.options.data[0]
-    let minLng = Infinity, maxLng = -Infinity
-    let minLat = Infinity, maxLat = -Infinity
+    // Store current zoom for LOD tracking
+    this.currentZoom = this.map?.getZoom() || 0
 
-    for (let i = 0; i < firstData.positions.length; i += 3) {
-      const lon = firstData.positions[i]
-      const lat = firstData.positions[i + 1]
-      minLng = Math.min(minLng, lon)
-      maxLng = Math.max(maxLng, lon)
-      minLat = Math.min(minLat, lat)
-      maxLat = Math.max(maxLat, lat)
+    // Calculate data center for reference (only on first creation)
+    if (!this.modelTransform) {
+      const firstData = this.options.data[0]
+      let minLng = Infinity, maxLng = -Infinity
+      let minLat = Infinity, maxLat = -Infinity
+
+      for (let i = 0; i < firstData.positions.length; i += 3) {
+        const lon = firstData.positions[i]
+        const lat = firstData.positions[i + 1]
+        minLng = Math.min(minLng, lon)
+        maxLng = Math.max(maxLng, lon)
+        minLat = Math.min(minLat, lat)
+        maxLat = Math.max(maxLat, lat)
+      }
+
+      const centerLng = (minLng + maxLng) / 2
+      const centerLat = (minLat + maxLat) / 2
+
+      console.log('[ThreeJSLayer] Data center:', { lng: centerLng, lat: centerLat })
+
+      // Get the MercatorCoordinate for the center point
+      const centerMerc = maplibregl.MercatorCoordinate.fromLngLat(
+        { lng: centerLng, lat: centerLat },
+        0
+      )
+
+      // Store for later use
+      this.modelTransform = {
+        translateX: centerMerc.x,
+        translateY: centerMerc.y,
+        translateZ: centerMerc.z || 0,
+        scale: centerMerc.meterInMercatorCoordinateUnits()
+      }
+
+      console.log('[ThreeJSLayer] Center Mercator coords:', this.modelTransform)
     }
 
-    const centerLng = (minLng + maxLng) / 2
-    const centerLat = (minLat + maxLat) / 2
-
-    console.log('[ThreeJSLayer] Data center:', { lng: centerLng, lat: centerLat })
-
-    // Get the MercatorCoordinate for the center point (for test sphere)
-    const centerMerc = maplibregl.MercatorCoordinate.fromLngLat(
-      { lng: centerLng, lat: centerLat },
-      0
-    )
-
-    // Store for later use (no longer applying as transform)
-    this.modelTransform = {
-      translateX: centerMerc.x,
-      translateY: centerMerc.y,
-      translateZ: centerMerc.z || 0,
-      scale: centerMerc.meterInMercatorCoordinateUnits()
-    }
-
-    console.log('[ThreeJSLayer] Center Mercator coords:', this.modelTransform)
+    // Get subsample rate based on zoom level
+    const subsampleRate = this.getSubsampleRate()
+    console.log(`[ThreeJSLayer] Creating point clouds at zoom ${this.currentZoom.toFixed(1)}, subsample rate: ${subsampleRate}`)
 
     // Create point clouds for each data file
     this.options.data.forEach((data, dataIndex) => {
       const positions: number[] = []
+      const colors: number[] = []
 
       console.log(`[ThreeJSLayer] Processing data file ${dataIndex}, points: ${data.positions.length / 3}`)
 
-      // Convert each point to RELATIVE Mercator coordinates (like copcViz)
-      // Subsample for better performance (render every Nth point)
-      const subsampleRate = 100 // Render 1 out of every 100 points (~46k points)
+      // Convert each point to RELATIVE Mercator coordinates
+      // Subsample based on zoom level for better performance
       for (let i = 0; i < data.positions.length; i += 3) {
         // Skip points based on subsample rate
         if ((i / 3) % subsampleRate !== 0) continue
@@ -132,45 +160,42 @@ export class ThreeJSLayer implements maplibregl.CustomLayerInterface {
           alt * 1000 // convert km to meters
         )
 
-        // Position RELATIVE to center in Mercator space (like copcViz)
-        const relX = merc.x - centerMerc.x
-        const relY = merc.y - centerMerc.y
-        const relZ = (merc.z || 0) - (centerMerc.z || 0)
+        // Position RELATIVE to center in Mercator space
+        const relX = merc.x - this.modelTransform!.translateX
+        const relY = merc.y - this.modelTransform!.translateY
+        const relZ = (merc.z || 0) - this.modelTransform!.translateZ
 
         positions.push(relX, relY, relZ)
+
+        // Also subsample the colors to match the subsampled positions
+        const colorIndex = i
+        colors.push(
+          data.colors[colorIndex] / 255,     // R (normalize to 0-1)
+          data.colors[colorIndex + 1] / 255, // G (normalize to 0-1)
+          data.colors[colorIndex + 2] / 255  // B (normalize to 0-1)
+        )
       }
 
-      console.log(`[ThreeJSLayer] Sample relative Mercator positions:`, positions.slice(0, 9))
+      console.log(`[ThreeJSLayer] Subsampled to ${positions.length / 3} points from ${data.positions.length / 3}`)
 
       // Create Three.js geometry
       const geometry = new THREE.BufferGeometry()
       geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-      geometry.setAttribute('color', new THREE.BufferAttribute(data.colors, 3, true))
+      geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
       geometry.computeBoundingBox()
 
-      console.log(`[ThreeJSLayer] Bounding box:`, geometry.boundingBox)
-
-      if (geometry.boundingBox) {
-        const min = geometry.boundingBox.min
-        const max = geometry.boundingBox.max
-        console.log(`[ThreeJSLayer] Bounding box details:`)
-        console.log(`  X range: ${min.x} to ${max.x} (width: ${max.x - min.x})`)
-        console.log(`  Y range: ${min.y} to ${max.y} (height: ${max.y - min.y})`)
-        console.log(`  Z range: ${min.z} to ${max.z} (depth: ${max.z - min.z})`)
-      }
-
       const material = new THREE.PointsMaterial({
-        size: this.options.pointSize * 10, // Even larger for debugging
+        size: this.options.pointSize * 10,
         vertexColors: true,
-        sizeAttenuation: false, // Use fixed screen-space size
-        depthTest: false, // TEMP: Disable to rule out depth issues
+        sizeAttenuation: false,
+        depthTest: false,
         depthWrite: false,
         transparent: true,
         opacity: 0.9
       })
 
       const points = new THREE.Points(geometry, material)
-      points.frustumCulled = false // Disable frustum culling - we're using MapLibre's camera
+      points.frustumCulled = false
       this.scene?.add(points)
       this.pointClouds.push(points)
     })
@@ -178,6 +203,41 @@ export class ThreeJSLayer implements maplibregl.CustomLayerInterface {
     console.log(`[ThreeJSLayer] Created ${this.pointClouds.length} point clouds, total points: ${this.pointClouds.reduce((sum, pc) => sum + pc.geometry.attributes.position.count, 0)}`)
 
     this.map?.triggerRepaint()
+  }
+
+  /**
+   * Update LOD if zoom level has changed significantly
+   */
+  private updateLOD() {
+    if (!this.map) return
+
+    const currentZoom = this.map.getZoom()
+    const zoomDelta = Math.abs(currentZoom - this.currentZoom)
+
+    // Update LOD if zoom changed by more than 1.5 levels
+    if (zoomDelta > 1.5) {
+      const now = Date.now()
+
+      // Throttle updates to every 500ms
+      if (now - this.lastLODUpdate > 500) {
+        console.log(`[ThreeJSLayer] LOD update triggered: zoom ${this.currentZoom.toFixed(1)} -> ${currentZoom.toFixed(1)}`)
+
+        // Clear existing point clouds
+        this.pointClouds.forEach(pc => {
+          this.scene?.remove(pc)
+          pc.geometry.dispose()
+          if (pc.material instanceof THREE.Material) {
+            pc.material.dispose()
+          }
+        })
+        this.pointClouds = []
+
+        // Recreate with new LOD level
+        this.createPointClouds()
+
+        this.lastLODUpdate = now
+      }
+    }
   }
 
   private renderCount = 0
@@ -209,6 +269,9 @@ export class ThreeJSLayer implements maplibregl.CustomLayerInterface {
     if (isFirstRender) {
       console.log('[ThreeJSLayer] First render! Point clouds:', this.pointClouds.length)
     }
+
+    // Update LOD based on zoom level
+    this.updateLOD()
 
     try {
       // Sync Three.js camera with MapLibre's camera

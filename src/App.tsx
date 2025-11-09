@@ -1,7 +1,9 @@
-import { useState } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import PointCloudViewer from './components/PointCloudViewer'
 import FileSelector from './components/FileSelector'
 import ControlPanel from './components/ControlPanel'
+import ControlsInfo from './components/ControlsInfo'
+import DataInfo from './components/DataInfo'
 import { Colormap } from './utils/colormaps'
 import { LatLon } from './utils/aoiSelector'
 import './App.css'
@@ -31,6 +33,12 @@ export interface DataRange {
   intensity: [number, number] | null
 }
 
+export interface HeightFilter {
+  enabled: boolean
+  min: number
+  max: number
+}
+
 function App() {
   const [fileMode, setFileMode] = useState<FileMode>('tiled')
   const [selectedFiles, setSelectedFiles] = useState<string[]>(fileMode === 'single' ? [SINGLE_FILES[0]] : TILED_FILES)
@@ -38,9 +46,24 @@ function App() {
   const [colormap, setColormap] = useState<Colormap>('plasma')
   const [pointSize, setPointSize] = useState(2.0)
   const [viewMode, setViewMode] = useState<ViewMode>('space')
+
+  // Global data range - never changes, represents full unfiltered data
+  const [globalDataRange, setGlobalDataRange] = useState<DataRange>({
+    elevation: null,
+    intensity: null
+  })
+
+  // Current data range - may be filtered
   const [dataRange, setDataRange] = useState<DataRange>({
     elevation: null,
     intensity: null
+  })
+
+  // Height filter state
+  const [heightFilter, setHeightFilter] = useState<HeightFilter>({
+    enabled: false,
+    min: 0,
+    max: 40
   })
 
   // AOI state
@@ -55,7 +78,14 @@ function App() {
   const [lastPoint, setLastPoint] = useState<{ lon: number, lat: number, alt: number, gpsTime: number } | null>(null)
   const [currentGpsTime, setCurrentGpsTime] = useState<number | null>(null)
   const [currentPosition, setCurrentPosition] = useState<{ lat: number, lon: number } | null>(null)
-  const [animateSatelliteTrigger, setAnimateSatelliteTrigger] = useState(false)
+  const [animateSatelliteTrigger, setAnimateSatelliteTrigger] = useState(0)
+
+  // Track if height filter has been initialized to prevent overwriting user changes
+  const [heightFilterInitialized, setHeightFilterInitialized] = useState(false)
+
+  // Ground mode state
+  const [isGroundModeActive, setIsGroundModeActive] = useState(false)
+  const [groundCameraPosition, setGroundCameraPosition] = useState<{ lat: number, lon: number } | null>(null)
 
   const handleFileModeChange = (mode: FileMode) => {
     setFileMode(mode)
@@ -96,17 +126,86 @@ function App() {
   }
 
   const handleAnimateSatellite = () => {
-    setAnimateSatelliteTrigger(prev => !prev)
+    setAnimateSatelliteTrigger(prev => prev + 1)
   }
 
   const handleCurrentGpsTimeUpdate = (gpsTime: number | null) => {
-    console.log('App: Updating currentGpsTime to:', gpsTime)
     setCurrentGpsTime(gpsTime)
   }
 
   const handleCurrentPositionUpdate = (lat: number, lon: number) => {
     setCurrentPosition({ lat, lon })
   }
+
+  const handleViewModeChange = (mode: ViewMode) => {
+    // Clear AOI selection when switching between views
+    if (mode !== viewMode) {
+      console.log(`[App] Switching view mode from ${viewMode} to ${mode}, clearing AOI`)
+      handleClearAOI()
+
+      // Set colormap to jet and point size to 10 when switching to 2D mode
+      if (mode === '2d') {
+        console.log(`[App] Switching to 2D mode, setting colormap to jet and point size to 10`)
+        setColormap('jet')
+        setPointSize(10)
+      }
+
+      // Disable ground mode when switching to space view (ground mode only works in 2D)
+      if (mode === 'space' && isGroundModeActive) {
+        console.log(`[App] Switching to space view, disabling ground mode`)
+        setIsGroundModeActive(false)
+        setGroundCameraPosition(null)
+      }
+    }
+    setViewMode(mode)
+  }
+
+  const handleHeightFilterChange = (updates: Partial<HeightFilter>) => {
+    setHeightFilter(prev => ({ ...prev, ...updates }))
+  }
+
+  const handleResetHeightFilter = () => {
+    setHeightFilter(prev => ({
+      ...prev,
+      min: globalDataRange.elevation ? globalDataRange.elevation[0] : 0,
+      max: globalDataRange.elevation ? globalDataRange.elevation[1] : 40
+    }))
+  }
+
+  const handleToggleGroundMode = () => {
+    setIsGroundModeActive(prev => !prev)
+    // Reset ground camera position when deactivating
+    if (isGroundModeActive) {
+      setGroundCameraPosition(null)
+    }
+  }
+
+  const handleGroundCameraPositionSet = (lat: number, lon: number) => {
+    setGroundCameraPosition({ lat, lon })
+  }
+
+  const handleExitGroundMode = () => {
+    setIsGroundModeActive(false)
+    setGroundCameraPosition(null)
+  }
+
+  const handleGlobalDataRangeUpdate = useCallback((range: DataRange) => {
+    // Set both global range (for validation) and current range (for display)
+    setGlobalDataRange(range)
+    setDataRange(range)
+  }, [])
+
+  // Update height filter range when data loads (only on initial load)
+  useEffect(() => {
+    if (globalDataRange.elevation && !heightFilterInitialized) {
+      setHeightFilter(prev => ({
+        ...prev,
+        min: globalDataRange.elevation![0],
+        max: globalDataRange.elevation![1]
+      }))
+      setHeightFilterInitialized(true)
+    }
+  }, [globalDataRange.elevation, heightFilterInitialized])
 
   return (
     <div className="app">
@@ -116,6 +215,7 @@ function App() {
         colormap={colormap}
         pointSize={pointSize}
         viewMode={viewMode}
+        onGlobalDataRangeUpdate={handleGlobalDataRangeUpdate}
         onDataRangeUpdate={setDataRange}
         aoiPolygon={aoiPolygon}
         showScatterPlotTrigger={showScatterPlotTrigger}
@@ -127,6 +227,10 @@ function App() {
         onLastPointUpdate={setLastPoint}
         onCurrentGpsTimeUpdate={handleCurrentGpsTimeUpdate}
         onCurrentPositionUpdate={handleCurrentPositionUpdate}
+        heightFilter={heightFilter}
+        isGroundModeActive={isGroundModeActive}
+        groundCameraPosition={groundCameraPosition}
+        onGroundCameraPositionSet={handleGroundCameraPositionSet}
       />
 
       <FileSelector
@@ -146,8 +250,12 @@ function App() {
         pointSize={pointSize}
         onPointSizeChange={setPointSize}
         viewMode={viewMode}
-        onViewModeChange={setViewMode}
+        onViewModeChange={handleViewModeChange}
         dataRange={dataRange}
+        globalDataRange={globalDataRange}
+        heightFilter={heightFilter}
+        onHeightFilterChange={handleHeightFilterChange}
+        onResetHeightFilter={handleResetHeightFilter}
         isDrawingAOI={isDrawingAOI}
         onToggleDrawAOI={handleToggleDrawAOI}
         onClearAOI={handleClearAOI}
@@ -160,7 +268,14 @@ function App() {
         currentGpsTime={currentGpsTime}
         currentPosition={currentPosition}
         onAnimateSatellite={handleAnimateSatellite}
+        isGroundModeActive={isGroundModeActive}
+        onToggleGroundMode={handleToggleGroundMode}
+        groundCameraPosition={groundCameraPosition}
       />
+
+      <DataInfo dataRange={dataRange} />
+
+      <ControlsInfo />
     </div>
   )
 }

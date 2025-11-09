@@ -15,6 +15,10 @@ export interface GlobeViewerHandle {
   setDrawingMode: (enabled: boolean) => void
   setViewMode: (mode: 'space' | '2d') => void
   animateSatelliteToFirstPoint: (firstPoint: { lon: number, lat: number, alt: number, gpsTime: number }, lastPoint: { lon: number, lat: number, alt: number, gpsTime: number }, positions?: Float32Array) => void
+  getCameraState: () => { distance: number, target: { lon: number, lat: number } } | null
+  setCameraState: (distance: number, target: { lon: number, lat: number }) => void
+  pauseRendering: () => void
+  resumeRendering: () => void
 }
 
 interface GlobeViewerProps {
@@ -23,10 +27,14 @@ interface GlobeViewerProps {
   onAnimationProgress?: (progress: number) => void
   onCurrentGpsTime?: (gpsTime: number) => void
   onCurrentPosition?: (lat: number, lon: number) => void
+  initialCameraState?: { distance: number, target: { lon: number, lat: number } }
+  isGroundModeActive?: boolean
+  groundCameraPosition?: { lat: number, lon: number } | null
+  onGroundCameraPositionSet?: (lat: number, lon: number) => void
 }
 
 const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref) => {
-  const { onClick, onPolygonComplete, onAnimationProgress, onCurrentGpsTime, onCurrentPosition } = props
+  const { onClick, onPolygonComplete, onAnimationProgress, onCurrentGpsTime, onCurrentPosition, initialCameraState, isGroundModeActive = false, groundCameraPosition: groundCameraPositionProp, onGroundCameraPositionSet } = props
   const containerRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null)
@@ -37,12 +45,19 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
   const laserBeamRef = useRef<THREE.Group | null>(null)
   const animationFrameRef = useRef<number | null>(null)
   const raycasterRef = useRef<THREE.Raycaster>(new THREE.Raycaster())
+  const renderEnabledRef = useRef<boolean>(true) // Control rendering during geometry updates
+  const lastCameraLogTimeRef = useRef<number>(0) // Throttle camera state logging
 
   // Polygon drawing state
   const [isDrawing, setIsDrawing] = useState(false)
   const isDrawingRef = useRef(false)
   const [polygonVertices, setPolygonVertices] = useState<LatLon[]>([])
+  const [completedPolygon, setCompletedPolygon] = useState<LatLon[] | null>(null)
   const polygonGroupRef = useRef<THREE.Group | null>(null)
+  const onPolygonCompleteRef = useRef(onPolygonComplete)
+
+  // Ground mode marker ref
+  const groundMarkerRef = useRef<THREE.Group | null>(null)
 
   // Helper to convert 3D point to lat/lon
   const point3DToLatLon = (point: THREE.Vector3): LatLon => {
@@ -144,6 +159,62 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
     laserBeamRef.current = laserGroup
   }
 
+  // Clear ground camera marker
+  const clearGroundMarker = () => {
+    if (groundMarkerRef.current && sceneRef.current) {
+      groundMarkerRef.current.children.forEach(child => {
+        if (child instanceof THREE.Mesh) {
+          child.geometry.dispose()
+          if (child.material instanceof THREE.Material) {
+            child.material.dispose()
+          }
+        }
+      })
+      sceneRef.current.remove(groundMarkerRef.current)
+      groundMarkerRef.current = null
+    }
+  }
+
+  // Create ground camera marker at specified position
+  const createGroundMarker = (lat: number, lon: number) => {
+    clearGroundMarker()
+
+    const markerGroup = new THREE.Group()
+    const position = latLonToPoint3D({ lat, lon }, 1.01) // Slightly above globe surface
+
+    // Create a cone marker pointing up
+    const coneGeometry = new THREE.ConeGeometry(0.02, 0.05, 8)
+    const coneMaterial = new THREE.MeshBasicMaterial({
+      color: 0xff0000,
+      transparent: true,
+      opacity: 0.9
+    })
+    const cone = new THREE.Mesh(coneGeometry, coneMaterial)
+
+    // Orient the cone to point away from globe center (up)
+    cone.position.copy(position)
+    cone.quaternion.setFromUnitVectors(
+      new THREE.Vector3(0, 1, 0),
+      position.clone().normalize()
+    )
+
+    markerGroup.add(cone)
+
+    // Add a small sphere at the base
+    const sphereGeometry = new THREE.SphereGeometry(0.015, 16, 16)
+    const sphereMaterial = new THREE.MeshBasicMaterial({
+      color: 0xff0000,
+      transparent: true,
+      opacity: 0.9
+    })
+    const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial)
+    sphere.position.copy(position)
+    markerGroup.add(sphere)
+
+    sceneRef.current?.add(markerGroup)
+    groundMarkerRef.current = markerGroup
+  }
+
   // Expose methods to parent
   useImperativeHandle(ref, () => ({
     getScene: () => sceneRef.current,
@@ -162,14 +233,29 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
     getPolygon: () => polygonVertices,
     clearPolygon: () => {
       setPolygonVertices([])
+      setCompletedPolygon(null)
       clearPolygonVisualization()
     },
     setDrawingMode: (enabled: boolean) => {
+      console.log(`[GlobeViewer] Setting drawing mode: ${enabled}`)
       setIsDrawing(enabled)
       isDrawingRef.current = enabled
-      if (!enabled && polygonVertices.length >= 3) {
-        // Complete the polygon
-        onPolygonComplete?.(polygonVertices)
+
+      if (!enabled) {
+        // User clicked "Finish AOI" - complete the polygon if we have at least 3 vertices
+        if (polygonVertices.length >= 3) {
+          console.log(`[GlobeViewer] Completing polygon with ${polygonVertices.length} vertices`)
+          setCompletedPolygon(polygonVertices) // Keep the polygon highlighted
+          onPolygonCompleteRef.current?.(polygonVertices)
+          setPolygonVertices([]) // Clear drawing vertices but keep completed polygon
+        } else if (polygonVertices.length > 0) {
+          console.log(`[GlobeViewer] Not enough vertices (${polygonVertices.length}), need at least 3`)
+        }
+      } else {
+        // Starting new drawing - clear any existing vertices and completed polygon
+        setPolygonVertices([])
+        setCompletedPolygon(null)
+        clearPolygonVisualization()
       }
     },
     setViewMode: (mode: 'space' | '2d') => {
@@ -193,9 +279,8 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
           satelliteRef.current.visible = false
         }
       } else {
-        // Space view: default position
-        camera.position.set(0, 0, 3)
-        controls.target.set(0, 0, 0)
+        // Space view: restore visibility without changing camera position
+        // (camera position is set during initialization or preserved from previous state)
         // Restore globe opacity and visibility
         if (globe.material instanceof THREE.MeshPhongMaterial) {
           globe.material.opacity = 0.95
@@ -210,21 +295,21 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       controls.update()
     },
     animateSatelliteToFirstPoint: (firstPoint: { lon: number, lat: number, alt: number, gpsTime: number }, lastPoint: { lon: number, lat: number, alt: number, gpsTime: number }, positions?: Float32Array) => {
-      if (!satelliteRef.current || !sceneRef.current) {
+      if (!satelliteRef.current || !sceneRef.current || !controlsRef.current) {
         console.warn('Satellite or scene not ready for animation')
         return
       }
-
-      console.log('Starting satellite animation')
-      console.log('First point:', firstPoint)
-      console.log('Last point:', lastPoint)
-      console.log('Positions array provided:', positions ? `yes (${positions.length / 3} points)` : 'no')
 
       // Cancel any existing animation
       if (animationFrameRef.current !== null) {
         cancelAnimationFrame(animationFrameRef.current)
         animationFrameRef.current = null
       }
+
+      // Disable OrbitControls during animation to prevent camera drift
+      const controls = controlsRef.current
+      controls.enabled = false
+      console.log('[GlobeViewer] 🔒 OrbitControls disabled for animation')
 
       // Reset animation progress to 0 (hides all points)
       onAnimationProgress?.(0)
@@ -266,8 +351,6 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
 
             // Interpolate GPS time linearly (we don't have individual GPS times per point here)
             currentGpsTime = firstPoint.gpsTime + (lastPoint.gpsTime - firstPoint.gpsTime) * eased
-
-            console.log(`Progress ${(eased * 100).toFixed(1)}%: Point ${currentPointIndex}/${totalPoints}, Lat=${currentLat.toFixed(2)}, Lon=${currentLon.toFixed(2)}`)
           } else {
             // Fallback to simple linear interpolation between first and last points
             currentLat = firstPoint.lat + (lastPoint.lat - firstPoint.lat) * eased
@@ -297,12 +380,178 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
           console.log('Animation complete')
           animationFrameRef.current = null
           onAnimationProgress?.(1.0) // Ensure final update
+
+          // Re-enable OrbitControls after animation completes
+          if (controlsRef.current) {
+            controlsRef.current.enabled = true
+            console.log('[GlobeViewer] 🔓 OrbitControls re-enabled')
+          }
         }
       }
 
       animate()
+    },
+    getCameraState: () => {
+      if (!cameraRef.current || !controlsRef.current) return null
+
+      const camera = cameraRef.current
+      const controls = controlsRef.current
+      const distance = camera.position.length()
+
+      // Get the target (where camera is looking at) and convert to lat/lon
+      const target = controls.target.clone().normalize()
+      const targetLatLon = point3DToLatLon(target)
+
+      // Throttle logging to once every 5 seconds
+      const now = Date.now()
+      if (now - lastCameraLogTimeRef.current >= 5000) {
+        lastCameraLogTimeRef.current = now
+
+        // Convert camera position to spherical coordinates for clarity
+        const camLatRad = Math.asin(camera.position.y / distance)
+        const camLonRad = Math.atan2(-camera.position.z, camera.position.x)
+        const camLatDeg = camLatRad * (180 / Math.PI)
+        const camLonDeg = camLonRad * (180 / Math.PI)
+
+        console.log('📸 GET Camera State:')
+        console.log('   Camera Position (Cartesian):')
+        console.log(`      x: ${camera.position.x.toFixed(4)} (East/West)`)
+        console.log(`      y: ${camera.position.y.toFixed(4)} (Up/Down)`)
+        console.log(`      z: ${camera.position.z.toFixed(4)} (North/South)`)
+        console.log('   Camera Position (Geographic):')
+        console.log(`      Latitude:  ${camLatDeg.toFixed(4)}°`)
+        console.log(`      Longitude: ${camLonDeg.toFixed(4)}°`)
+        console.log(`      Distance:  ${distance.toFixed(4)}`)
+        console.log('   Target:')
+        console.log(`      Cartesian: (${controls.target.x.toFixed(4)}, ${controls.target.y.toFixed(4)}, ${controls.target.z.toFixed(4)})`)
+        console.log(`      Lat/Lon: (${targetLatLon.lat.toFixed(4)}°, ${targetLatLon.lon.toFixed(4)}°)`)
+      }
+
+      return {
+        distance,
+        target: { lon: targetLatLon.lon, lat: targetLatLon.lat }
+      }
+    },
+    setCameraState: (distance: number, target: { lon: number, lat: number }) => {
+      if (!cameraRef.current || !controlsRef.current) return
+
+      const camera = cameraRef.current
+      const controls = controlsRef.current
+
+      console.log('==================== CAMERA STATE UPDATE ====================')
+      console.log('📍 Input Parameters:')
+      console.log(`   Distance: ${distance.toFixed(4)}`)
+      console.log(`   Target Lat/Lon: (${target.lat.toFixed(4)}°, ${target.lon.toFixed(4)}°)`)
+
+      // Convert target lat/lon to 3D point
+      const targetPoint = latLonToPoint3D(target, 1.0)
+      console.log(`   Target 3D Point: (${targetPoint.x.toFixed(4)}, ${targetPoint.y.toFixed(4)}, ${targetPoint.z.toFixed(4)})`)
+      controls.target.copy(targetPoint)
+
+      // Position camera using spherical coordinates relative to target
+      // Elevation: vertical angle above horizon (0° = on horizon, 90° = directly above)
+      // Azimuth: horizontal rotation around target (0° = north, 90° = east, 180° = south, 270° = west)
+      const elevationDegrees = 0  // Angle above target's horizon
+      const azimuthDegrees = 90    // Rotation around target (0° = due north of target)
+
+      const elevationRad = elevationDegrees * (Math.PI / 180)
+      const azimuthRad = azimuthDegrees * (Math.PI / 180)
+
+      console.log('📐 Camera Positioning (Spherical Coordinates):')
+      console.log(`   Elevation: ${elevationDegrees}° (angle above horizon)`)
+      console.log(`   Azimuth:   ${azimuthDegrees}° (rotation around target, 0°=North)`)
+      console.log(`   Distance:  ${distance.toFixed(4)}`)
+
+      // Convert target to 3D point (already done above, but for clarity)
+      const targetPos = targetPoint
+
+      // Calculate camera offset from target in spherical coordinates
+      // Using a local coordinate frame centered at the target
+
+      // Get "up" direction at target (radial direction from Earth center)
+      const up = targetPos.clone().normalize()
+
+      // Get "north" direction at target (tangent to meridian)
+      const north = new THREE.Vector3(0, 1, 0).cross(up).cross(up).normalize()
+      if (north.length() < 0.1) {
+        // Near poles, use a different reference
+        north.set(0, 0, 1).cross(up).normalize()
+      }
+
+      // Get "east" direction at target
+      const east = up.clone().cross(north).normalize()
+
+      // Calculate camera offset in local frame
+      const horizontalDist = distance * Math.cos(elevationRad)
+      const verticalDist = distance * Math.sin(elevationRad)
+
+      // Offset in local coordinates
+      const offsetNorth = horizontalDist * Math.cos(azimuthRad)
+      const offsetEast = horizontalDist * Math.sin(azimuthRad)
+      const offsetUp = verticalDist
+
+      console.log('   Offset from target (local frame):')
+      console.log(`      North: ${offsetNorth.toFixed(4)}`)
+      console.log(`      East:  ${offsetEast.toFixed(4)}`)
+      console.log(`      Up:    ${offsetUp.toFixed(4)}`)
+
+      // Convert to world coordinates
+      const cameraOffset = new THREE.Vector3()
+      cameraOffset.addScaledVector(north, offsetNorth)
+      cameraOffset.addScaledVector(east, offsetEast)
+      cameraOffset.addScaledVector(up, offsetUp)
+
+      const cameraPosition = targetPos.clone().add(cameraOffset)
+
+      console.log('📷 Final Camera Position (Cartesian):')
+      console.log(`   x: ${cameraPosition.x.toFixed(4)} (East/West component)`)
+      console.log(`   y: ${cameraPosition.y.toFixed(4)} (Up/Down component - elevation)`)
+      console.log(`   z: ${cameraPosition.z.toFixed(4)} (North/South component)`)
+
+      camera.position.copy(cameraPosition)
+
+      controls.update()
+
+      // Convert camera position back to spherical for verification
+      const camDist = camera.position.length()
+      const camLatRad = Math.asin(camera.position.y / camDist)
+      const camLonRad = Math.atan2(-camera.position.z, camera.position.x)
+      const camLatDeg = camLatRad * (180 / Math.PI)
+      const camLonDeg = camLonRad * (180 / Math.PI)
+
+      // Calculate viewing angle/direction
+      const viewDirection = new THREE.Vector3().subVectors(controls.target, camera.position).normalize()
+      const viewDown = Math.asin(-viewDirection.y) * (180 / Math.PI) // Angle looking down from horizontal
+
+      // Log final state after update
+      console.log('✅ Controls Updated:')
+      console.log(`   Controls target (Cartesian): (${controls.target.x.toFixed(4)}, ${controls.target.y.toFixed(4)}, ${controls.target.z.toFixed(4)})`)
+      console.log(`   Camera position (Cartesian): (${camera.position.x.toFixed(4)}, ${camera.position.y.toFixed(4)}, ${camera.position.z.toFixed(4)})`)
+      console.log('')
+      console.log('📍 Camera Position (Geographic):')
+      console.log(`   Camera Latitude:  ${camLatDeg.toFixed(4)}°`)
+      console.log(`   Camera Longitude: ${camLonDeg.toFixed(4)}°`)
+      console.log(`   Camera Distance:  ${camDist.toFixed(4)}`)
+      console.log('')
+      console.log('👁️  Viewing Direction:')
+      console.log(`   Looking ${viewDown >= 0 ? 'down' : 'up'} at ${Math.abs(viewDown).toFixed(2)}° from horizontal`)
+      console.log(`   View vector: (${viewDirection.x.toFixed(4)}, ${viewDirection.y.toFixed(4)}, ${viewDirection.z.toFixed(4)})`)
+      console.log('============================================================')
+    },
+    pauseRendering: () => {
+      renderEnabledRef.current = false
+      console.log('[GlobeViewer] ⏸️  Rendering paused for geometry update')
+    },
+    resumeRendering: () => {
+      renderEnabledRef.current = true
+      console.log('[GlobeViewer] ▶️  Rendering resumed')
     }
-  }), [polygonVertices, onPolygonComplete, latLonToPoint3D, createLaserBeam, clearLaserBeam, onAnimationProgress, onCurrentGpsTime, onCurrentPosition])
+  }), [polygonVertices, completedPolygon, onPolygonComplete, latLonToPoint3D, createLaserBeam, clearLaserBeam, onAnimationProgress, onCurrentGpsTime, onCurrentPosition, point3DToLatLon])
+
+  // Keep ref in sync with prop
+  useEffect(() => {
+    onPolygonCompleteRef.current = onPolygonComplete
+  }, [onPolygonComplete])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -318,7 +567,49 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
 
     // Create camera with closer near plane for sea-level viewing
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.001, 10000)
-    camera.position.set(0, 0, 3)
+
+    console.log('🎬 ==================== INITIAL CAMERA SETUP ====================')
+    console.log(`   FOV: 45°, Aspect: ${(width / height).toFixed(4)}, Near: 0.001, Far: 10000`)
+
+    // Set initial camera position from prop or use default
+    if (initialCameraState) {
+      console.log('📍 Setting up camera with initial state:')
+      console.log(`   Distance: ${initialCameraState.distance.toFixed(4)}`)
+      console.log(`   Target Lat/Lon: (${initialCameraState.target.lat.toFixed(4)}°, ${initialCameraState.target.lon.toFixed(4)}°)`)
+
+      const targetPoint = latLonToPoint3D(initialCameraState.target, 1.0)
+      console.log(`   Target 3D Point: (${targetPoint.x.toFixed(4)}, ${targetPoint.y.toFixed(4)}, ${targetPoint.z.toFixed(4)})`)
+
+      const direction = targetPoint.clone().normalize()
+      console.log(`   Direction (normalized): (${direction.x.toFixed(4)}, ${direction.y.toFixed(4)}, ${direction.z.toFixed(4)})`)
+
+      const finalPosition = direction.multiplyScalar(initialCameraState.distance)
+      console.log('   Final Position (Cartesian):')
+      console.log(`      x: ${finalPosition.x.toFixed(4)} (East/West)`)
+      console.log(`      y: ${finalPosition.y.toFixed(4)} (Up/Down)`)
+      console.log(`      z: ${finalPosition.z.toFixed(4)} (North/South)`)
+
+      camera.position.copy(finalPosition)
+
+      // Convert to spherical for verification
+      const dist = camera.position.length()
+      const camLat = Math.asin(camera.position.y / dist) * (180 / Math.PI)
+      const camLon = Math.atan2(-camera.position.z, camera.position.x) * (180 / Math.PI)
+
+      console.log('   Camera Position (Geographic):')
+      console.log(`      Latitude:  ${camLat.toFixed(4)}°`)
+      console.log(`      Longitude: ${camLon.toFixed(4)}°`)
+      console.log(`      Distance:  ${dist.toFixed(4)}`)
+    } else {
+      camera.position.set(0, 0, 3)
+      console.log('📍 Using default camera position:')
+      console.log('   Cartesian: (0, 0, 3)')
+      console.log('   This is straight out along the Z-axis at distance 3')
+      console.log(`   Distance from origin: ${camera.position.length().toFixed(4)}`)
+    }
+
+    console.log('============================================================')
+
     cameraRef.current = camera
 
     // Create renderer
@@ -490,6 +781,30 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
     controls.maxDistance = 10
     controls.autoRotate = false
     controls.autoRotateSpeed = 0.5
+
+    // Set initial controls target if provided
+    if (initialCameraState) {
+      console.log('🎯 ==================== INITIAL CONTROLS TARGET ====================')
+      const targetPoint = latLonToPoint3D(initialCameraState.target, 1.0)
+      console.log('   Target (Geographic):')
+      console.log(`      Latitude:  ${initialCameraState.target.lat.toFixed(4)}°`)
+      console.log(`      Longitude: ${initialCameraState.target.lon.toFixed(4)}°`)
+      console.log('   Target (Cartesian):')
+      console.log(`      x: ${targetPoint.x.toFixed(4)} (East/West)`)
+      console.log(`      y: ${targetPoint.y.toFixed(4)} (Up/Down)`)
+      console.log(`      z: ${targetPoint.z.toFixed(4)} (North/South)`)
+
+      controls.target.copy(targetPoint)
+      controls.update()
+
+      console.log('')
+      console.log('   After controls.update():')
+      console.log(`      Controls target: (${controls.target.x.toFixed(4)}, ${controls.target.y.toFixed(4)}, ${controls.target.z.toFixed(4)})`)
+      console.log(`      Camera position: (${camera.position.x.toFixed(4)}, ${camera.position.y.toFixed(4)}, ${camera.position.z.toFixed(4)})`)
+      console.log(`      Camera distance: ${camera.position.length().toFixed(4)}`)
+      console.log('================================================================')
+    }
+
     controlsRef.current = controls
 
     // Animation loop
@@ -498,7 +813,11 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       animationFrameId = requestAnimationFrame(animate)
 
       controls.update()
-      renderer.render(scene, camera)
+
+      // Only render if rendering is enabled (not paused for geometry updates)
+      if (renderEnabledRef.current) {
+        renderer.render(scene, camera)
+      }
     }
     animate()
 
@@ -513,7 +832,7 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
     }
     window.addEventListener('resize', handleResize)
 
-    // Handle click for raycasting and polygon drawing
+    // Handle click for raycasting, polygon drawing, and ground mode
     const handleClick = (event: MouseEvent) => {
       const rect = renderer.domElement.getBoundingClientRect()
       const mouse = new THREE.Vector2()
@@ -526,13 +845,44 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       if (globeRef.current) {
         const intersects = raycasterRef.current.intersectObject(globeRef.current)
 
-        if (intersects.length > 0 && isDrawingRef.current) {
-          // Drawing mode: add vertex to polygon
+        if (intersects.length > 0) {
           const point = intersects[0].point
           const latLon = point3DToLatLon(point)
 
-          setPolygonVertices(prev => [...prev, latLon])
-          return
+          // Ground mode: place camera marker
+          if (isGroundModeActive && onGroundCameraPositionSet) {
+            onGroundCameraPositionSet(latLon.lat, latLon.lon)
+            return
+          }
+
+          // Drawing mode: add vertex to polygon
+          if (isDrawingRef.current) {
+            setPolygonVertices(prev => {
+              // Maximum 4 vertices
+              if (prev.length >= 4) {
+                console.log('[GlobeViewer] Maximum 4 vertices reached, ignoring click')
+                return prev
+              }
+
+              const newVertices = [...prev, latLon]
+              console.log(`[GlobeViewer] Added vertex ${newVertices.length} at (${latLon.lat.toFixed(4)}, ${latLon.lon.toFixed(4)})`)
+
+              // Auto-complete when 4th vertex is added
+              if (newVertices.length === 4) {
+                console.log('[GlobeViewer] Auto-completing polygon with 4 vertices')
+                setTimeout(() => {
+                  setCompletedPolygon(newVertices) // Keep the polygon highlighted
+                  onPolygonCompleteRef.current?.(newVertices)
+                  setPolygonVertices([])
+                  setIsDrawing(false)
+                  isDrawingRef.current = false
+                }, 100) // Small delay to allow visual feedback
+              }
+
+              return newVertices
+            })
+            return
+          }
         }
       }
 
@@ -587,9 +937,44 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Visualize polygon as vertices are added
+  // Helper to create text sprite for vertex numbers
+  const createTextSprite = (text: string, backgroundColor: string, textColor: string): THREE.Sprite => {
+    const canvas = document.createElement('canvas')
+    const context = canvas.getContext('2d')!
+    canvas.width = 128
+    canvas.height = 128
+
+    // Draw background circle
+    context.fillStyle = backgroundColor
+    context.beginPath()
+    context.arc(64, 64, 60, 0, Math.PI * 2)
+    context.fill()
+
+    // Draw text
+    context.fillStyle = textColor
+    context.font = 'bold 80px Arial'
+    context.textAlign = 'center'
+    context.textBaseline = 'middle'
+    context.fillText(text, 64, 64)
+
+    const texture = new THREE.CanvasTexture(canvas)
+    texture.needsUpdate = true
+
+    const material = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false, // Always show on top
+      depthWrite: false
+    })
+    const sprite = new THREE.Sprite(material)
+    sprite.scale.set(0.025, 0.025, 1) // 50% smaller for better proportions
+
+    return sprite
+  }
+
+  // Visualize polygon (both drawing and completed)
   useEffect(() => {
-    if (!sceneRef.current || polygonVertices.length === 0) return
+    if (!sceneRef.current) return
 
     // Clear existing visualization
     clearPolygonVisualization()
@@ -600,47 +985,104 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
 
     const radius = 1.004 // Slightly above globe surface
 
-    // Draw lines connecting vertices
-    if (polygonVertices.length >= 2) {
-      const points: THREE.Vector3[] = []
+    // Visualize completed polygon (if exists)
+    if (completedPolygon && completedPolygon.length >= 3) {
+      // Draw filled polygon for completed AOI
+      const points: THREE.Vector3[] = completedPolygon.map(vertex =>
+        latLonToPoint3D(vertex, radius)
+      )
+      points.push(latLonToPoint3D(completedPolygon[0], radius)) // Close the loop
 
-      polygonVertices.forEach(vertex => {
-        points.push(latLonToPoint3D(vertex, radius))
-      })
-
-      // Close the polygon if we have 3+ vertices
-      if (polygonVertices.length >= 3) {
-        points.push(latLonToPoint3D(polygonVertices[0], radius))
-      }
-
-      const geometry = new THREE.BufferGeometry().setFromPoints(points)
-      const material = new THREE.LineBasicMaterial({
-        color: 0xff0000,
-        linewidth: 2,
+      // Add polygon outline
+      const lineGeometry = new THREE.BufferGeometry().setFromPoints(points)
+      const lineMaterial = new THREE.LineBasicMaterial({
+        color: 0xffff00, // Yellow
+        linewidth: 3,
         transparent: true,
-        opacity: 0.8
+        opacity: 1.0
+      })
+      const line = new THREE.Line(lineGeometry, lineMaterial)
+      polygonGroup.add(line)
+
+      // Add numbered vertex markers for completed polygon
+      completedPolygon.forEach((vertex, index) => {
+        const position = latLonToPoint3D(vertex, radius)
+
+        // Yellow sphere marker
+        const sphereGeometry = new THREE.SphereGeometry(0.01, 16, 16)
+        const sphereMaterial = new THREE.MeshBasicMaterial({ color: 0xffff00 })
+        const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial)
+        sphere.position.copy(position)
+        polygonGroup.add(sphere)
+
+        // Add number sprite - offset outward from globe for visibility
+        const numberSprite = createTextSprite((index + 1).toString(), '#ffff00', '#000000')
+        const offsetPosition = position.clone().multiplyScalar(1.02) // Move outward from globe
+        numberSprite.position.copy(offsetPosition)
+        polygonGroup.add(numberSprite)
       })
 
-      const line = new THREE.Line(geometry, material)
-      polygonGroup.add(line)
+      console.log(`[GlobeViewer] Visualizing completed polygon with ${completedPolygon.length} vertices`)
     }
 
-    // Draw vertex markers
-    polygonVertices.forEach(vertex => {
-      const position = latLonToPoint3D(vertex, radius)
-      const sphereGeometry = new THREE.SphereGeometry(0.01, 8, 8)
-      const sphereMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 })
-      const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial)
-      sphere.position.copy(position)
-      polygonGroup.add(sphere)
-    })
+    // Visualize drawing vertices (if any)
+    if (polygonVertices.length > 0) {
+      // Draw lines connecting vertices
+      if (polygonVertices.length >= 2) {
+        const points: THREE.Vector3[] = []
 
-    sceneRef.current.add(polygonGroup)
+        polygonVertices.forEach(vertex => {
+          points.push(latLonToPoint3D(vertex, radius))
+        })
+
+        // Close the polygon if we have 3+ vertices
+        if (polygonVertices.length >= 3) {
+          points.push(latLonToPoint3D(polygonVertices[0], radius))
+        }
+
+        const geometry = new THREE.BufferGeometry().setFromPoints(points)
+        const material = new THREE.LineBasicMaterial({
+          color: 0xffff00, // Yellow during drawing
+          linewidth: 2,
+          transparent: true,
+          opacity: 0.8
+        })
+
+        const line = new THREE.Line(geometry, material)
+        polygonGroup.add(line)
+      }
+
+      // Draw numbered vertex markers
+      polygonVertices.forEach((vertex, index) => {
+        const position = latLonToPoint3D(vertex, radius)
+
+        // Different color for first vertex (green) vs others (red)
+        const color = index === 0 ? 0x00ff00 : 0xff0000
+        const bgColor = index === 0 ? '#00ff00' : '#ff0000'
+        const sphereGeometry = new THREE.SphereGeometry(0.01, 16, 16)
+        const sphereMaterial = new THREE.MeshBasicMaterial({ color })
+        const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial)
+        sphere.position.copy(position)
+        polygonGroup.add(sphere)
+
+        // Add number sprite - offset outward from globe for visibility
+        const numberSprite = createTextSprite((index + 1).toString(), bgColor, '#ffffff')
+        const offsetPosition = position.clone().multiplyScalar(1.02) // Move outward from globe
+        numberSprite.position.copy(offsetPosition)
+        polygonGroup.add(numberSprite)
+      })
+
+      console.log(`[GlobeViewer] Visualizing ${polygonVertices.length} drawing vertices`)
+    }
+
+    if (polygonGroup.children.length > 0) {
+      sceneRef.current.add(polygonGroup)
+    }
 
     return () => {
       clearPolygonVisualization()
     }
-  }, [polygonVertices])
+  }, [polygonVertices, completedPolygon])
 
   // Load satellite 3D model
   useEffect(() => {
@@ -652,7 +1094,6 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       '/Landsat 1, 2, and 3.glb',
       // onLoad callback
       (gltf) => {
-        console.log('Satellite model loaded successfully')
         const satellite = gltf.scene
 
         // Scale down the satellite (GLB models are often large)
@@ -668,16 +1109,9 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
         // Add to scene
         sceneRef.current?.add(satellite)
         satelliteRef.current = satellite
-
-        console.log('Satellite added to scene at position:', satellite.position)
       },
       // onProgress callback
-      (progress) => {
-        if (progress.total > 0) {
-          const percent = (progress.loaded / progress.total) * 100
-          console.log(`Loading satellite model: ${percent.toFixed(1)}%`)
-        }
-      },
+      undefined,
       // onError callback
       (error) => {
         console.error('Error loading satellite model:', error)
@@ -705,6 +1139,20 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       }
     }
   }, [])
+
+  // Manage ground camera marker
+  useEffect(() => {
+    if (groundCameraPositionProp && sceneRef.current) {
+      createGroundMarker(groundCameraPositionProp.lat, groundCameraPositionProp.lon)
+    } else {
+      clearGroundMarker()
+    }
+
+    // Cleanup on unmount
+    return () => {
+      clearGroundMarker()
+    }
+  }, [groundCameraPositionProp])
 
   return (
     <div

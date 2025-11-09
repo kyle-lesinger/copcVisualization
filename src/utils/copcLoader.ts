@@ -298,7 +298,6 @@ export async function loadCOPCFile(url: string, onProgress?: (progress: number) 
       minGpsTime = Math.min(minGpsTime, gpsTimes[i])
       maxGpsTime = Math.max(maxGpsTime, gpsTimes[i])
     }
-    console.log(`GPS time range before sorting: ${minGpsTime} to ${maxGpsTime}`)
 
     // Sort points by x,y (lat/lon) position groups, keeping all Z values together
     console.log('Grouping and sorting by x,y positions...')
@@ -367,10 +366,6 @@ export async function loadCOPCFile(url: string, onProgress?: (progress: number) 
       alt: sortedPositions[(actualPointsRead - 1) * 3 + 2],
       gpsTime: sortedGpsTimes[actualPointsRead - 1]
     }
-
-    console.log(`GPS time range after sorting: ${sortedGpsTimes[0]} to ${sortedGpsTimes[actualPointsRead - 1]}`)
-    console.log('First point (earliest):', firstPoint)
-    console.log('Last point (latest):', lastPoint)
 
     if (onProgress) onProgress(95)
 

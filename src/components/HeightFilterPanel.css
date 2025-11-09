@@ -1,0 +1,145 @@
+.height-filter-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.height-filter-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.height-filter-header h4 {
+  margin: 0;
+}
+
+.height-filter-toggle {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+.height-filter-toggle input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.height-filter-toggle .toggle-label {
+  padding: 4px 12px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.7);
+  transition: all 0.2s;
+  min-width: 40px;
+  text-align: center;
+}
+
+.height-filter-toggle input[type="checkbox"]:checked + .toggle-label {
+  background: #4a9eff;
+  border-color: #4a9eff;
+  color: white;
+}
+
+.height-filter-controls {
+  transition: opacity 0.2s;
+}
+
+.height-filter-controls.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.height-input-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.height-input-group {
+  flex: 1;
+}
+
+.height-input-group .control-label {
+  margin-bottom: 6px;
+}
+
+.height-input {
+  width: 100%;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  color: white;
+  font-size: 13px;
+  font-family: inherit;
+  transition: all 0.2s;
+}
+
+.height-input:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.height-input:focus {
+  outline: none;
+  border-color: #4a9eff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.height-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* Remove spinner arrows from number input */
+.height-input::-webkit-outer-spin-button,
+.height-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.height-input[type=number] {
+  -moz-appearance: textfield;
+}
+
+.validation-error {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  background: rgba(255, 82, 82, 0.1);
+  border: 1px solid rgba(255, 82, 82, 0.4);
+  border-radius: 4px;
+  color: #ff9999;
+  font-size: 12px;
+}
+
+.height-filter-summary {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: rgba(74, 158, 255, 0.1);
+  border: 1px solid rgba(74, 158, 255, 0.3);
+  border-radius: 4px;
+}
+
+.height-filter-summary .range-text {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.9);
+  font-weight: 500;
+}
+
+.height-filter-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.height-filter-buttons .control-button {
+  flex: 1;
+  margin-right: 0;
+  margin-bottom: 0;
+}

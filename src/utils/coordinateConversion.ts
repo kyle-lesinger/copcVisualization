@@ -137,3 +137,149 @@ export function convertPointsTo2D(
 
   return cartesian
 }
+
+/**
+ * Calculate the haversine distance between two geographic coordinates.
+ * Returns distance in kilometers.
+ *
+ * @param lat1 Latitude of first point in degrees
+ * @param lon1 Longitude of first point in degrees
+ * @param lat2 Latitude of second point in degrees
+ * @param lon2 Longitude of second point in degrees
+ * @returns Distance in kilometers
+ */
+export function haversineDistance(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  // Convert to radians
+  const dLat = (lat2 - lat1) * (Math.PI / 180)
+  const dLon = (lon2 - lon1) * (Math.PI / 180)
+  const lat1Rad = lat1 * (Math.PI / 180)
+  const lat2Rad = lat2 * (Math.PI / 180)
+
+  // Haversine formula
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1Rad) * Math.cos(lat2Rad) * Math.sin(dLon / 2) * Math.sin(dLon / 2)
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+
+  return EARTH_RADIUS_KM * c
+}
+
+/**
+ * Calculate the bearing (direction) from one point to another.
+ * Returns bearing in degrees (0-360), where 0 is North, 90 is East, etc.
+ *
+ * @param lat1 Latitude of first point in degrees
+ * @param lon1 Longitude of first point in degrees
+ * @param lat2 Latitude of second point in degrees
+ * @param lon2 Longitude of second point in degrees
+ * @returns Bearing in degrees (0-360)
+ */
+export function calculateBearing(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  // Convert to radians
+  const lat1Rad = lat1 * (Math.PI / 180)
+  const lat2Rad = lat2 * (Math.PI / 180)
+  const dLon = (lon2 - lon1) * (Math.PI / 180)
+
+  // Calculate bearing
+  const y = Math.sin(dLon) * Math.cos(lat2Rad)
+  const x =
+    Math.cos(lat1Rad) * Math.sin(lat2Rad) -
+    Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLon)
+
+  let bearing = Math.atan2(y, x) * (180 / Math.PI)
+
+  // Normalize to 0-360
+  bearing = (bearing + 360) % 360
+
+  return bearing
+}
+
+/**
+ * Calculate a new geographic point at a given distance and bearing from a starting point.
+ * Uses the Haversine formula for spherical earth calculations.
+ *
+ * @param lat Starting latitude in degrees
+ * @param lon Starting longitude in degrees
+ * @param distanceKm Distance to travel in kilometers
+ * @param bearingDeg Bearing/direction in degrees (0=North, 90=East, 180=South, 270=West)
+ * @returns Object with new latitude and longitude
+ */
+export function calculatePointAtDistanceAndBearing(
+  lat: number,
+  lon: number,
+  distanceKm: number,
+  bearingDeg: number
+): { lat: number; lon: number } {
+  // Convert to radians
+  const latRad = lat * (Math.PI / 180)
+  const lonRad = lon * (Math.PI / 180)
+  const bearingRad = bearingDeg * (Math.PI / 180)
+
+  // Angular distance in radians
+  const angularDistance = distanceKm / EARTH_RADIUS_KM
+
+  // Calculate new latitude
+  const newLatRad = Math.asin(
+    Math.sin(latRad) * Math.cos(angularDistance) +
+    Math.cos(latRad) * Math.sin(angularDistance) * Math.cos(bearingRad)
+  )
+
+  // Calculate new longitude
+  const newLonRad = lonRad + Math.atan2(
+    Math.sin(bearingRad) * Math.sin(angularDistance) * Math.cos(latRad),
+    Math.cos(angularDistance) - Math.sin(latRad) * Math.sin(newLatRad)
+  )
+
+  // Convert back to degrees
+  const newLat = newLatRad * (180 / Math.PI)
+  let newLon = newLonRad * (180 / Math.PI)
+
+  // Normalize longitude to -180 to 180 range
+  while (newLon > 180) newLon -= 360
+  while (newLon < -180) newLon += 360
+
+  return { lat: newLat, lon: newLon }
+}
+
+/**
+ * Check if a point is inside a polygon using the ray-casting algorithm.
+ *
+ * @param point Object with lat and lon properties
+ * @param polygon Array of vertices, each with lat and lon properties
+ * @returns true if point is inside polygon, false otherwise
+ */
+export function isPointInPolygon(
+  point: { lat: number; lon: number },
+  polygon: Array<{ lat: number; lon: number }>
+): boolean {
+  if (polygon.length < 3) return false
+
+  let inside = false
+  const x = point.lon
+  const y = point.lat
+
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].lon
+    const yi = polygon[i].lat
+    const xj = polygon[j].lon
+    const yj = polygon[j].lat
+
+    const intersect = ((yi > y) !== (yj > y)) &&
+      (x < (xj - xi) * (y - yi) / (yj - yi) + xi)
+
+    if (intersect) inside = !inside
+  }
+
+  return inside
+}

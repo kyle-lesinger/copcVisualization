@@ -85,11 +85,10 @@ export default function ControlPanel({
         >
           <option value="elevation">Elevation (Altitude)</option>
           <option value="intensity">Intensity (Backscatter 532nm)</option>
-          <option value="classification">Classification</option>
         </select>
       </div>
 
-      {colorMode !== 'classification' && (
+      {(
         <>
           <div className="control-group">
             <label className="control-label">Colormap</label>

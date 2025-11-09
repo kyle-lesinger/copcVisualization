@@ -123,6 +123,16 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
         if (cameraState) {
           // Only update if target is not at origin (indicates valid position)
           if (cameraState.target.lon !== 0 || cameraState.target.lat !== 0) {
+            const prev = last3DCameraStateRef.current
+            const changed = !prev ||
+              Math.abs(prev.distance - cameraState.distance) > 0.01 ||
+              Math.abs(prev.target.lon - cameraState.target.lon) > 0.001 ||
+              Math.abs(prev.target.lat - cameraState.target.lat) > 0.001
+
+            if (changed) {
+              console.log(`[PointCloudViewer] 📹 3D camera updated: distance ${cameraState.distance.toFixed(4)}, target (${cameraState.target.lon.toFixed(4)}, ${cameraState.target.lat.toFixed(4)})`)
+            }
+
             last3DCameraStateRef.current = cameraState
           }
         }
@@ -680,19 +690,24 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
 
   // Load COPC files
   useEffect(() => {
-    if (!globeRef.current || files.length === 0) return
+    if (files.length === 0) return
 
-    const scene = globeRef.current.getScene()
-    if (!scene) return
-
-    // Remove existing point clouds
-    pointCloudsRef.current.forEach(pc => {
-      scene.remove(pc)
-      pc.geometry.dispose()
-      if (pc.material instanceof THREE.Material) {
-        pc.material.dispose()
+    // Clean up existing point clouds if in 3D mode
+    if (viewMode !== '2d' && globeRef.current) {
+      const scene = globeRef.current.getScene()
+      if (scene) {
+        // Remove existing point clouds from 3D scene
+        pointCloudsRef.current.forEach(pc => {
+          scene.remove(pc)
+          pc.geometry.dispose()
+          if (pc.material instanceof THREE.Material) {
+            pc.material.dispose()
+          }
+        })
       }
-    })
+    }
+
+    // Clear data references (for both 2D and 3D)
     pointCloudsRef.current = []
     dataRef.current = []
 
@@ -813,17 +828,48 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
         // Use fixed distance of 1.8 for best detail (decimation 1:2, ~2.3M points)
         const calculatedDistance = 1.8
 
-        console.log(`[PointCloudViewer] Data extent: ${extentLng.toFixed(2)}° lng × ${extentLat.toFixed(2)}° lat, using camera distance: ${calculatedDistance.toFixed(2)}`)
+        // Check if we have a valid camera state from switching from 3D view
+        // If so, skip auto-zoom calculation to preserve the camera state
+        if (viewMode === '2d' && last2DMapStateRef.current) {
+          console.log(`[PointCloudViewer] 📍 Skipping auto-zoom - using camera state from 3D→2D switch: center (${last2DMapStateRef.current.center[0].toFixed(4)}, ${last2DMapStateRef.current.center[1].toFixed(4)}), zoom ${last2DMapStateRef.current.zoom.toFixed(4)}`)
+          // Keep the current mapCenter and mapZoom that were set during view switch
+          setInitialCameraDistance(calculatedDistance)
+        } else {
+          // Calculate appropriate zoom level to fit the data extent
+          // MapLibre zoom levels: zoom 0 shows ~360° longitude, each level halves the view
+          // We want to fit the larger extent (with some padding)
+          const maxExtent = Math.max(extentLng, extentLat)
+          const paddingFactor = 1.5 // Add 50% padding around the data
+          const paddedExtent = maxExtent * paddingFactor
 
-        setMapCenter([centerLng, centerLat])
-        setInitialCameraDistance(calculatedDistance)
+          // Calculate zoom: log2(360 / extent) gives zoom for longitude at equator
+          // Clamp between 2 (world view) and 12 (close up)
+          const calculatedZoom = Math.max(2, Math.min(12, Math.log2(360 / paddedExtent)))
 
-        // Use withRenderPause to pause rendering during geometry creation
-        // This prevents THREE.js buffer corruption errors
-        withRenderPause(async () => {
-          // Create point clouds for each file
-          let totalPoints = 0
-          allData.forEach((data, dataIndex) => {
+          console.log(`[PointCloudViewer] Data extent: ${extentLng.toFixed(2)}° lng × ${extentLat.toFixed(2)}° lat, calculated zoom: ${calculatedZoom.toFixed(2)}`)
+
+          setMapCenter([centerLng, centerLat])
+          setMapZoom(calculatedZoom)
+          setInitialCameraDistance(calculatedDistance)
+        }
+
+        // For 3D mode: create THREE.js geometries and add to scene
+        if (viewMode !== '2d' && globeRef.current) {
+          const scene = globeRef.current.getScene()
+          if (!scene) {
+            console.warn('[PointCloudViewer] Scene not available for 3D rendering')
+            setLoading(false)
+            setDataLoaded(true)
+            setDataVersion(prev => prev + 1)
+            return
+          }
+
+          // Use withRenderPause to pause rendering during geometry creation
+          // This prevents THREE.js buffer corruption errors
+          withRenderPause(async () => {
+            // Create point clouds for each file
+            let totalPoints = 0
+            allData.forEach((data, dataIndex) => {
             // Don't apply height filter on initial load - it will be applied by the height filter effect
             // This prevents reloading data every time the height filter changes
 
@@ -931,13 +977,27 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
           setDataVersion(prev => prev + 1)
           setPointCloudVersion(prev => prev + 1) // Trigger progressive rendering effect
         }) // Close withRenderPause callback
+        } else {
+          // For 2D mode: Data is already stored in dataRef, just update loading states
+          console.log(`[PointCloudViewer] 📍 2D mode: Data loaded, skipping THREE.js geometry creation`)
+          setLoading(false)
+          setDataLoaded(true)
+          setDataVersion(prev => prev + 1)
+
+          // Calculate stats from raw data for 2D mode
+          let totalPoints = 0
+          allData.forEach(data => {
+            totalPoints += data.positions.length / 3
+          })
+          setStats({ points: totalPoints, files: allData.length })
+        }
       })
       .catch((err) => {
         console.error('Error loading COPC files:', err)
         setError(err.message || 'Failed to load COPC files')
         setLoading(false)
       })
-  }, [files, pointSize, onGlobalDataRangeUpdate, onDataRangeUpdate])
+  }, [files, pointSize, onGlobalDataRangeUpdate, onDataRangeUpdate, viewMode, colorMode, colormap])
 
   // Reposition camera to data center when data first loads (NOT on every render)
   useEffect(() => {

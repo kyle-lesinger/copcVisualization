@@ -243,7 +243,11 @@ export function calculatePointAtDistanceAndBearing(
 
   // Convert back to degrees
   const newLat = newLatRad * (180 / Math.PI)
-  const newLon = newLonRad * (180 / Math.PI)
+  let newLon = newLonRad * (180 / Math.PI)
+
+  // Normalize longitude to -180 to 180 range
+  while (newLon > 180) newLon -= 360
+  while (newLon < -180) newLon += 360
 
   return { lat: newLat, lon: newLon }
 }

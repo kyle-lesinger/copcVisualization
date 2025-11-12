@@ -152,10 +152,11 @@ function parsePointFormat6(
 
 /**
  * Load a LAZ/COPC file and extract point cloud data using laz-perf
+ * NOTE: This is the simple loader for 2D mode. For 3D with octree optimization, use COPCLODManager.
  */
 export async function loadCOPCFile(url: string, onProgress?: (progress: number) => void): Promise<PointCloudData> {
   try {
-    console.log(`Loading LAZ file: ${url}`)
+    console.log(`[copcLoader.ts] Loading LAZ file for 2D mode: ${url}`)
 
     // Fetch the file
     const response = await fetch(url)

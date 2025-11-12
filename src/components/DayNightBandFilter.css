@@ -1,0 +1,68 @@
+.band-filter-section {
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.band-filter-header {
+  margin-bottom: 12px;
+}
+
+.band-filter-header h4 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: white;
+}
+
+.band-filter-controls {
+  /* No special styling needed, uses parent styles */
+}
+
+.band-select {
+  width: 100%;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  color: white;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.band-select:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.band-select:focus {
+  outline: none;
+  border-color: #4a9eff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.band-select option {
+  background: #1e1e1e;
+  color: white;
+}
+
+.band-info {
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: rgba(74, 158, 255, 0.1);
+  border: 1px solid rgba(74, 158, 255, 0.3);
+  border-radius: 4px;
+}
+
+.band-info .info-text {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.9);
+  line-height: 1.6;
+}
+
+.band-info .info-text strong {
+  font-weight: 600;
+  color: white;
+}

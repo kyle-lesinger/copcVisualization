@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import * as THREE from 'three'
-import { ColorMode, Colormap, DataRange, ViewMode, HeightFilter } from '../App'
+import { ColorMode, Colormap, DataRange, ViewMode, HeightFilter, SpatialBoundsFilter } from '../App'
 import {
   loadCOPCFile,
   PointCloudData,
@@ -8,6 +8,7 @@ import {
   computeIntensityColors,
   computeClassificationColors
 } from '../utils/copcLoader'
+import { COPCLODManager, SpatialBounds } from '../utils/copcLoaderLOD'
 import { convertPointsToGlobe, convertPointsTo2D, haversineDistance, calculateBearing, calculatePointAtDistanceAndBearing } from '../utils/coordinateConversion'
 import { LatLon, filterDataByAOI } from '../utils/aoiSelector'
 import GlobeViewer, { GlobeViewerHandle } from './GlobeViewer'
@@ -34,22 +35,25 @@ interface PointCloudViewerProps {
   onCurrentGpsTimeUpdate?: (gpsTime: number | null) => void
   onCurrentPositionUpdate?: (lat: number, lon: number) => void
   heightFilter?: HeightFilter
+  spatialBoundsFilter?: SpatialBoundsFilter
   isGroundModeActive?: boolean
   groundCameraPosition?: { lat: number, lon: number } | null
   onGroundCameraPositionSet?: (lat: number, lon: number) => void
 }
 
-export default function PointCloudViewer({ files, colorMode, colormap, pointSize, viewMode, onGlobalDataRangeUpdate, onDataRangeUpdate, aoiPolygon, showScatterPlotTrigger, onAOIDataReady, onPolygonUpdate, isDrawingAOI, onAnimateSatelliteTrigger, onFirstPointUpdate, onLastPointUpdate, onCurrentGpsTimeUpdate, onCurrentPositionUpdate, heightFilter, isGroundModeActive, groundCameraPosition, onGroundCameraPositionSet }: PointCloudViewerProps) {
+export default function PointCloudViewer({ files, colorMode, colormap, pointSize, viewMode, onGlobalDataRangeUpdate, onDataRangeUpdate, aoiPolygon, showScatterPlotTrigger, onAOIDataReady, onPolygonUpdate, isDrawingAOI, onAnimateSatelliteTrigger, onFirstPointUpdate, onLastPointUpdate, onCurrentGpsTimeUpdate, onCurrentPositionUpdate, heightFilter, spatialBoundsFilter, isGroundModeActive, groundCameraPosition, onGroundCameraPositionSet }: PointCloudViewerProps) {
   const globeRef = useRef<GlobeViewerHandle>(null)
   const deckMapRef = useRef<DeckGLMapViewHandle>(null)
-  const pointCloudsRef = useRef<THREE.Points[]>([])
-  const dataRef = useRef<PointCloudData[]>([])
+  const pointCloudsRef = useRef<THREE.Points[]>([]) // For 2D mode only
+  const dataRef = useRef<PointCloudData[]>([]) // For 2D mode only
+  const lodManagersRef = useRef<COPCLODManager[]>([]) // For 3D mode with LOD
   const displayedPositionsRef = useRef<Float32Array | null>(null) // Track decimated positions for satellite animation
   const originalPositionsRef = useRef<Float32Array | null>(null) // Store ORIGINAL unfiltered positions for satellite path
   const lastCameraDistanceRef = useRef<number>(3.0) // Default camera distance
   const animationFrameRef = useRef<number | null>(null)
+  const lodUpdateFrameRef = useRef<number | null>(null) // Separate animation frame for LOD updates
 
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
   const [loadingProgress, setLoadingProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [stats, setStats] = useState({ points: 0, files: 0 })
@@ -688,15 +692,190 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
 
   // Globe viewer is initialized by the GlobeViewer component
 
+  // Helper function to load files with LOD manager (3D mode)
+  const loadWithLODManager = useCallback(async () => {
+    const scene = globeRef.current?.getScene()
+    if (!scene) {
+      setError('Scene not available for 3D rendering')
+      setLoading(false)
+      return
+    }
+
+    console.log('╔═══════════════════════════════════════════════════════════╗')
+    console.log('║     📂 LOADING WITH LOD MANAGER (OCTREE OPTIMIZED)        ║')
+    console.log('╚═══════════════════════════════════════════════════════════╝')
+    console.log(`[PointCloudViewer] Loading ${files.length} file(s) with COPCLODManager`)
+
+    if (spatialBoundsFilter?.enabled) {
+      console.log(`[PointCloudViewer] 🗺️  Spatial bounds filter ENABLED:`)
+      console.log(`  • Lon: ${spatialBoundsFilter.minLon.toFixed(2)}° to ${spatialBoundsFilter.maxLon.toFixed(2)}°`)
+      console.log(`  • Lat: ${spatialBoundsFilter.minLat.toFixed(2)}° to ${spatialBoundsFilter.maxLat.toFixed(2)}°`)
+      console.log(`  • Alt: ${spatialBoundsFilter.minAlt.toFixed(2)} to ${spatialBoundsFilter.maxAlt.toFixed(2)} km`)
+    }
+
+    try {
+      // Initialize LOD managers for each file
+      const managers = await Promise.all(
+        files.map(async (file, index) => {
+          console.log(`[PointCloudViewer] Initializing LOD manager ${index + 1}/${files.length}: ${file.split('/').pop()}`)
+          setLoadingProgress(((index + 1) / files.length) * 50) // 0-50% for initialization
+
+          // Pass pause/resume rendering methods to prevent buffer corruption
+          const pauseRendering = () => globeRef.current?.pauseRendering()
+          const resumeRendering = () => globeRef.current?.resumeRendering()
+
+          const manager = new COPCLODManager(file, scene, pauseRendering, resumeRendering)
+          await manager.initialize()
+
+          // Apply spatial bounds if enabled
+          if (spatialBoundsFilter?.enabled) {
+            const bounds: SpatialBounds = {
+              enabled: true,
+              minLon: spatialBoundsFilter.minLon,
+              maxLon: spatialBoundsFilter.maxLon,
+              minLat: spatialBoundsFilter.minLat,
+              maxLat: spatialBoundsFilter.maxLat,
+              minAlt: spatialBoundsFilter.minAlt,
+              maxAlt: spatialBoundsFilter.maxAlt
+            }
+            manager.setSpatialBounds(bounds)
+          }
+
+          // Set color mode and point size
+          manager.setColorMode(colorMode, colormap)
+          manager.setPointSize(pointSize * 0.002) // Scale for globe
+
+          // Get data range from first manager
+          if (index === 0) {
+            const dataBounds = manager.getDataBounds()
+            if (dataBounds.spatial) {
+              const ranges: DataRange = {
+                elevation: [dataBounds.spatial.minAlt, dataBounds.spatial.maxAlt],
+                intensity: [0, 3.5] // CALIPSO intensity range
+              }
+              setGlobalRanges(ranges)
+              setFilteredRanges(ranges)
+              onGlobalDataRangeUpdate(ranges)
+              onDataRangeUpdate(ranges)
+            }
+          }
+
+          // Get first/last points for satellite animation
+          const firstPt = manager.getFirstPoint()
+          const lastPt = manager.getLastPoint()
+          if (index === 0 && firstPt && lastPt) {
+            setFirstPoint(firstPt)
+            setLastPoint(lastPt)
+          }
+
+          return manager
+        })
+      )
+
+      lodManagersRef.current = managers
+
+      // Log detected data bounds and compare with current filter
+      if (managers.length > 0) {
+        const bounds = managers[0].getDataBounds()
+        if (bounds.spatial) {
+          console.log(`[PointCloudViewer] 📊 DETECTED DATA BOUNDS:`)
+          console.log(`  • Longitude: ${bounds.spatial.minLon.toFixed(2)}° to ${bounds.spatial.maxLon.toFixed(2)}°`)
+          console.log(`  • Latitude:  ${bounds.spatial.minLat.toFixed(2)}° to ${bounds.spatial.maxLat.toFixed(2)}°`)
+          console.log(`  • Altitude:  ${bounds.spatial.minAlt.toFixed(2)} to ${bounds.spatial.maxAlt.toFixed(2)} km`)
+
+          // Check if current spatial filter includes the data
+          if (spatialBoundsFilter?.enabled) {
+            const filter = spatialBoundsFilter
+            const lonInRange = bounds.spatial.minLon >= filter.minLon && bounds.spatial.maxLon <= filter.maxLon
+            const latInRange = bounds.spatial.minLat >= filter.minLat && bounds.spatial.maxLat <= filter.maxLat
+            const altInRange = bounds.spatial.minAlt >= filter.minAlt && bounds.spatial.maxAlt <= filter.maxAlt
+
+            if (!lonInRange || !latInRange || !altInRange) {
+              console.warn(`[PointCloudViewer] ⚠️  SPATIAL FILTER MISMATCH!`)
+              console.warn(`  Current filter does not fully include the data bounds.`)
+              console.warn(`  `)
+              console.warn(`  💡 QUICK FIX: Copy and paste these values into the Spatial Filter panel:`)
+              console.warn(`  `)
+              console.warn(`     Longitude Min: ${Math.floor(bounds.spatial.minLon - 5)}`)
+              console.warn(`     Longitude Max: ${Math.ceil(bounds.spatial.maxLon + 5)}`)
+              console.warn(`     Latitude Min:  ${Math.floor(bounds.spatial.minLat - 5)}`)
+              console.warn(`     Latitude Max:  ${Math.ceil(bounds.spatial.maxLat + 5)}`)
+              console.warn(`     Altitude Min:  ${Math.floor(bounds.spatial.minAlt)}`)
+              console.warn(`     Altitude Max:  ${Math.ceil(bounds.spatial.maxAlt + 1)}`)
+              console.warn(`  `)
+              console.warn(`  Then click "Apply Filter"`)
+              console.warn(`  `)
+              console.warn(`  OR: Disable spatial filter entirely to see all data`)
+            } else {
+              console.log(`[PointCloudViewer] ✅ Spatial filter includes all data bounds`)
+            }
+          } else {
+            console.log(`[PointCloudViewer] ℹ️  No spatial filter active - all data will be loaded`)
+          }
+        }
+      }
+
+      // Trigger initial LOD update
+      if (globeRef.current) {
+        const camera = globeRef.current.getCamera()
+        if (camera) {
+          managers.forEach(m => m.update(camera))
+        }
+      }
+
+      console.log(`[PointCloudViewer] ✅ ${managers.length} LOD manager(s) initialized`)
+      console.log(`[PointCloudViewer] 🎯 Point budget per manager: 2,000,000 points`)
+      console.log('╚═══════════════════════════════════════════════════════════╝\n')
+
+      setLoadingProgress(100)
+      setLoading(false)
+      setDataLoaded(true)
+      setDataVersion(prev => prev + 1)
+
+    } catch (err) {
+      console.error('Error loading with LOD manager:', err)
+      setError(err instanceof Error ? err.message : 'Failed to load with LOD manager')
+      setLoading(false)
+    }
+  }, [files, spatialBoundsFilter, colorMode, colormap, pointSize, onGlobalDataRangeUpdate, onDataRangeUpdate])
+
   // Load COPC files
   useEffect(() => {
-    if (files.length === 0) return
+    if (files.length === 0) {
+      // Clean up LOD managers
+      lodManagersRef.current.forEach(m => m.dispose())
+      lodManagersRef.current = []
+
+      // Clean up simple loader data
+      if (viewMode !== '2d' && globeRef.current) {
+        const scene = globeRef.current.getScene()
+        if (scene) {
+          pointCloudsRef.current.forEach(pc => {
+            scene.remove(pc)
+            pc.geometry.dispose()
+            if (pc.material instanceof THREE.Material) {
+              pc.material.dispose()
+            }
+          })
+        }
+      }
+      pointCloudsRef.current = []
+      dataRef.current = []
+
+      setLoading(false)
+      setDataLoaded(false)
+      setError(null)
+      return
+    }
+
+    // Clean up existing LOD managers before loading new ones
+    lodManagersRef.current.forEach(m => m.dispose())
+    lodManagersRef.current = []
 
     // Clean up existing point clouds if in 3D mode
     if (viewMode !== '2d' && globeRef.current) {
       const scene = globeRef.current.getScene()
       if (scene) {
-        // Remove existing point clouds from 3D scene
         pointCloudsRef.current.forEach(pc => {
           scene.remove(pc)
           pc.geometry.dispose()
@@ -707,13 +886,53 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
       }
     }
 
-    // Clear data references (for both 2D and 3D)
+    // Clear data references
     pointCloudsRef.current = []
     dataRef.current = []
 
     setLoading(true)
     setError(null)
     setLoadingProgress(0)
+
+    // Choose loading method based on view mode
+    if (viewMode !== '2d') {
+      // 3D mode: Use LOD manager
+      loadWithLODManager()
+      return // Exit early, LOD manager handles everything
+    }
+
+    // 2D mode: Use simple loader (keep existing logic below)
+
+    // Log file loading with filter context
+    console.log('╔═══════════════════════════════════════════════════════════╗')
+    console.log('║         📂 LOADING COPC FILES WITH ACTIVE FILTERS         ║')
+    console.log('╚═══════════════════════════════════════════════════════════╝')
+    console.log(`[PointCloudViewer] 📁 Loading ${files.length} file(s):`)
+    files.forEach((file, idx) => {
+      const filename = file.split('/').pop() || file
+      console.log(`  ${idx + 1}. ${filename}`)
+    })
+
+    if (spatialBoundsFilter?.enabled) {
+      console.log(`\n[PointCloudViewer] 🗺️  Active filters will be applied:`)
+      console.log(`  ✓ Spatial Bounds Filter: ENABLED`)
+      console.log(`    • Lon: ${spatialBoundsFilter.minLon.toFixed(2)}° to ${spatialBoundsFilter.maxLon.toFixed(2)}°`)
+      console.log(`    • Lat: ${spatialBoundsFilter.minLat.toFixed(2)}° to ${spatialBoundsFilter.maxLat.toFixed(2)}°`)
+      console.log(`    • Alt: ${spatialBoundsFilter.minAlt.toFixed(2)} to ${spatialBoundsFilter.maxAlt.toFixed(2)} km`)
+      console.log(`\n[PointCloudViewer] ⚡ COPC Octree Optimization:`)
+      console.log(`  • Only octree nodes intersecting the spatial bounds will be loaded`)
+      console.log(`  • Individual points will be filtered per-node`)
+      console.log(`  • HTTP Range requests will fetch ONLY necessary data chunks`)
+      console.log(`  • This avoids loading the ENTIRE file into memory!`)
+    } else {
+      console.log(`\n[PointCloudViewer] ℹ️  Spatial Bounds Filter: DISABLED (loading all visible data)`)
+    }
+
+    if (heightFilter?.enabled) {
+      console.log(`  ✓ Height Filter: ${heightFilter.min.toFixed(2)} to ${heightFilter.max.toFixed(2)} km`)
+    }
+
+    console.log('╚═══════════════════════════════════════════════════════════╝\n')
 
     // Load all files
     Promise.all(
@@ -999,6 +1218,63 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
       })
   }, [files, pointSize, onGlobalDataRangeUpdate, onDataRangeUpdate, viewMode, colorMode, colormap])
 
+  // Update LOD managers when spatial bounds filter changes
+  useEffect(() => {
+    if (lodManagersRef.current.length === 0) return
+
+    if (spatialBoundsFilter?.enabled) {
+      console.log('[PointCloudViewer] Updating LOD managers with spatial bounds filter')
+      const bounds: SpatialBounds = {
+        enabled: true,
+        minLon: spatialBoundsFilter.minLon,
+        maxLon: spatialBoundsFilter.maxLon,
+        minLat: spatialBoundsFilter.minLat,
+        maxLat: spatialBoundsFilter.maxLat,
+        minAlt: spatialBoundsFilter.minAlt,
+        maxAlt: spatialBoundsFilter.maxAlt
+      }
+      lodManagersRef.current.forEach(manager => {
+        manager.setSpatialBounds(bounds)
+      })
+    } else {
+      console.log('[PointCloudViewer] Disabling spatial bounds filter on LOD managers')
+      lodManagersRef.current.forEach(manager => {
+        manager.setSpatialBounds(null)
+      })
+    }
+  }, [spatialBoundsFilter])
+
+  // LOD Manager Update Loop - runs every frame in 3D mode
+  useEffect(() => {
+    if (viewMode !== 'space' || lodManagersRef.current.length === 0 || !dataLoaded) {
+      return
+    }
+
+    console.log('[PointCloudViewer] Starting LOD manager update loop')
+
+    const updateLoop = () => {
+      const camera = globeRef.current?.getCamera()
+      if (camera && lodManagersRef.current.length > 0) {
+        // Update all LOD managers based on camera position
+        lodManagersRef.current.forEach(manager => {
+          manager.update(camera)
+        })
+      }
+
+      lodUpdateFrameRef.current = requestAnimationFrame(updateLoop)
+    }
+
+    updateLoop()
+
+    return () => {
+      if (lodUpdateFrameRef.current !== null) {
+        cancelAnimationFrame(lodUpdateFrameRef.current)
+        lodUpdateFrameRef.current = null
+      }
+      console.log('[PointCloudViewer] Stopped LOD manager update loop')
+    }
+  }, [viewMode, dataLoaded])
+
   // Reposition camera to data center when data first loads (NOT on every render)
   useEffect(() => {
     if (!dataLoaded || !globeRef.current || viewMode === '2d') return
@@ -1216,6 +1492,15 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
       // 2. We just switched to 3D view (to ensure colors are applied)
       const reason = switchedTo3D ? 'switched to 3D view' : 'color/colormap changed'
       console.log(`[PointCloudViewer] ${reason} in 3D view - fast color update`)
+
+      // Update LOD managers
+      if (lodManagersRef.current.length > 0) {
+        lodManagersRef.current.forEach(manager => {
+          manager.setColorMode(colorMode, colormap)
+        })
+      }
+
+      // Update simple loader point clouds (fallback)
       updateColors3D()
     }
   }, [colorMode, colormap, globalRanges, filteredRanges, heightFilter, filterPointsByHeight, viewMode, updateColors3D])
@@ -1223,6 +1508,14 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
   // Update point size for globe view (2D handled by DeckGLMapView props)
   useEffect(() => {
     if (viewMode !== '2d') {
+      // Update LOD managers (3D with octree optimization)
+      if (lodManagersRef.current.length > 0) {
+        lodManagersRef.current.forEach(manager => {
+          manager.setPointSize(pointSize * 0.002)
+        })
+      }
+
+      // Update simple loader point clouds (fallback/2D)
       pointCloudsRef.current.forEach((pc) => {
         if (pc.material instanceof THREE.PointsMaterial) {
           pc.material.size = pointSize * 0.002
@@ -1588,6 +1881,27 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
     return undefined
   }, [viewMode, mapCenter, mapZoom])
 
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      console.log('[PointCloudViewer] Cleaning up on unmount')
+
+      // Dispose LOD managers
+      lodManagersRef.current.forEach(manager => {
+        manager.dispose()
+      })
+      lodManagersRef.current = []
+
+      // Cancel animation frames
+      if (lodUpdateFrameRef.current !== null) {
+        cancelAnimationFrame(lodUpdateFrameRef.current)
+      }
+      if (animationFrameRef.current !== null) {
+        cancelAnimationFrame(animationFrameRef.current)
+      }
+    }
+  }, [])
+
   return (
     <div className="point-cloud-viewer">
       {viewMode === '2d' ? (
@@ -1644,9 +1958,31 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
         </div>
       )}
 
-      {!loading && !error && (
+      {!loading && !error && (stats.files > 0 || lodManagersRef.current.length > 0) && (
         <div className="stats-overlay">
-          {stats.points.toLocaleString()} points • {stats.files} file{stats.files !== 1 ? 's' : ''}
+          {(() => {
+            // For LOD manager mode, show loaded node points
+            if (lodManagersRef.current.length > 0) {
+              const lodStats = lodManagersRef.current.reduce((acc, manager) => {
+                const stats = manager.getStats()
+                return {
+                  loadedNodes: acc.loadedNodes + stats.loadedNodes,
+                  totalPoints: acc.totalPoints + stats.totalPoints
+                }
+              }, { loadedNodes: 0, totalPoints: 0 })
+
+              return `${lodStats.totalPoints.toLocaleString()} points (${lodStats.loadedNodes} nodes) • ${lodManagersRef.current.length} file${lodManagersRef.current.length !== 1 ? 's' : ''} (LOD)`
+            }
+
+            // For simple loader mode, show total points
+            return `${stats.points.toLocaleString()} points • ${stats.files} file${stats.files !== 1 ? 's' : ''}`
+          })()}
+        </div>
+      )}
+
+      {!loading && !error && stats.files === 0 && lodManagersRef.current.length === 0 && (
+        <div className="stats-overlay">
+          No data loaded. Configure filters and load COPC files to visualize.
         </div>
       )}
 

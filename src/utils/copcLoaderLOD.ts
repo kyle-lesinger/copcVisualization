@@ -1,7 +1,8 @@
 import * as THREE from 'three'
-import Copc from 'copc'
+import { Copc } from 'copc'  // Named import, not default!
 import { Colormap } from './colormaps'
 import { computeElevationColors, computeIntensityColors, computeClassificationColors } from './copcLoader'
+import { latLonAltToVector3 } from './coordinateConversion'
 
 /**
  * COPC Octree Node for LOD management
@@ -22,7 +23,30 @@ export interface COPCNode {
     colors: Uint8Array
     intensities: Uint16Array
     classifications: Uint8Array
+    gpsTimes?: Float64Array // GPS time for each point (TAI93)
   }
+}
+
+/**
+ * Spatial bounds filter for selective data loading
+ */
+export interface SpatialBounds {
+  enabled: boolean
+  minLon: number
+  maxLon: number
+  minLat: number
+  maxLat: number
+  minAlt: number
+  maxAlt: number
+}
+
+/**
+ * GPS time range filter for selective data loading
+ */
+export interface TimeRange {
+  enabled: boolean
+  minGpsTime: number // TAI seconds since 1993-01-01
+  maxGpsTime: number // TAI seconds since 1993-01-01
 }
 
 /**
@@ -31,11 +55,17 @@ export interface COPCNode {
 export class COPCLODManager {
   private copc: any
   private filename: string
+  private getter: (begin: number, end: number) => Promise<Uint8Array>
   private scene: THREE.Scene
   private nodes: Map<string, COPCNode> = new Map()
   private rootNode: COPCNode | null = null
   private pointBudget: number = 2_000_000 // Max points to display
   private currentPointCount: number = 0
+  private hasLoggedFrustumCull: boolean = false
+
+  // Rendering control callbacks
+  private pauseRendering: (() => void) | null = null
+  private resumeRendering: (() => void) | null = null
 
   // Rendering parameters
   private colorMode: 'elevation' | 'intensity' | 'classification' = 'intensity'
@@ -51,9 +81,42 @@ export class COPCLODManager {
   // Height filter
   private heightFilter: { enabled: boolean, min: number, max: number } | null = null
 
-  constructor(filename: string, scene: THREE.Scene) {
+  // Spatial bounds filter
+  private spatialBounds: SpatialBounds | null = null
+
+  // GPS time range filter
+  private timeRange: TimeRange | null = null
+
+  // First and last points for satellite animation
+  private firstPoint: { lon: number, lat: number, alt: number, gpsTime: number } | null = null
+  private lastPoint: { lon: number, lat: number, alt: number, gpsTime: number } | null = null
+
+  constructor(
+    filename: string,
+    scene: THREE.Scene,
+    pauseRendering?: () => void,
+    resumeRendering?: () => void
+  ) {
     this.filename = filename
     this.scene = scene
+    this.pauseRendering = pauseRendering || null
+    this.resumeRendering = resumeRendering || null
+
+    // Create a getter function for browser-based HTTP range requests
+    this.getter = async (begin: number, end: number): Promise<Uint8Array> => {
+      const headers: HeadersInit = {}
+      if (begin !== undefined && end !== undefined) {
+        headers.Range = `bytes=${begin}-${end - 1}`
+      }
+
+      const response = await fetch(filename, { headers })
+      if (!response.ok) {
+        throw new Error(`HTTP error ${response.status}: ${response.statusText}`)
+      }
+
+      const arrayBuffer = await response.arrayBuffer()
+      return new Uint8Array(arrayBuffer)
+    }
   }
 
   /**
@@ -62,8 +125,8 @@ export class COPCLODManager {
   async initialize(): Promise<void> {
     console.log('[COPCLODManager] Initializing COPC file:', this.filename)
 
-    // Create COPC object
-    this.copc = await Copc.create(this.filename)
+    // Create COPC object with custom getter for browser
+    this.copc = await Copc.create(this.getter)
 
     console.log('[COPCLODManager] COPC Info:', {
       pointCount: this.copc.header.pointCount,
@@ -73,7 +136,7 @@ export class COPCLODManager {
 
     // Load root hierarchy page
     const { nodes, pages } = await Copc.loadHierarchyPage(
-      this.filename,
+      this.getter,
       this.copc.info.rootHierarchyPage
     )
 
@@ -118,6 +181,12 @@ export class COPCLODManager {
     this.dataRange.intensity = [0.0, 3.5]
 
     console.log('[COPCLODManager] Data ranges:', this.dataRange)
+
+    // Log geographic extent for easy reference
+    console.log('[COPCLODManager] 🌍 Geographic extent:')
+    console.log(`  Longitude: ${this.copc.header.min[0].toFixed(2)}° to ${this.copc.header.max[0].toFixed(2)}°`)
+    console.log(`  Latitude:  ${this.copc.header.min[1].toFixed(2)}° to ${this.copc.header.max[1].toFixed(2)}°`)
+    console.log(`  Altitude:  ${this.copc.header.min[2].toFixed(2)} to ${this.copc.header.max[2].toFixed(2)} km`)
   }
 
   /**
@@ -125,7 +194,7 @@ export class COPCLODManager {
    */
   private async loadHierarchyPage(pageInfo: any): Promise<void> {
     const { nodes, pages } = await Copc.loadHierarchyPage(
-      this.filename,
+      this.getter,
       pageInfo
     )
 
@@ -205,6 +274,32 @@ export class COPCLODManager {
   }
 
   /**
+   * Check if node bounds intersect with spatial bounds filter
+   */
+  private nodeIntersectsSpatialBounds(node: COPCNode): boolean {
+    if (!this.spatialBounds || !this.spatialBounds.enabled) {
+      return true // No filter, all nodes pass
+    }
+
+    const nodeBounds = node.bounds
+    const filter = this.spatialBounds
+
+    // Check if bounding boxes intersect in 3D space
+    // Node is rejected if it's completely outside any dimension of the filter
+    if (nodeBounds.max.x < filter.minLon || nodeBounds.min.x > filter.maxLon) {
+      return false // No overlap in X (longitude)
+    }
+    if (nodeBounds.max.y < filter.minLat || nodeBounds.min.y > filter.maxLat) {
+      return false // No overlap in Y (latitude)
+    }
+    if (nodeBounds.max.z < filter.minAlt || nodeBounds.min.z > filter.maxAlt) {
+      return false // No overlap in Z (altitude)
+    }
+
+    return true // Boxes intersect
+  }
+
+  /**
    * Recursively traverse octree and load/unload nodes based on visibility
    */
   private async traverseOctree(
@@ -212,11 +307,64 @@ export class COPCLODManager {
     camera: THREE.Camera,
     frustum: THREE.Frustum
   ): Promise<void> {
-    // Check if node bounds are in frustum
-    if (!frustum.intersectsBox(node.bounds)) {
-      // Not visible - unload if loaded
+    // TEMPORARY: Disable frustum culling for globe coordinate system
+    // TODO: Convert node bounds from geographic to Cartesian coords for proper frustum culling
+    const ENABLE_FRUSTUM_CULLING = false
+
+    if (ENABLE_FRUSTUM_CULLING) {
+      // Check if node bounds are in frustum
+      if (!frustum.intersectsBox(node.bounds)) {
+        // Not visible - unload if loaded
+        if (node.loaded) {
+          this.unloadNode(node)
+        }
+
+        // Log frustum culling for root node to help debug (only once)
+        if (node.depth === 0 && !this.hasLoggedFrustumCull) {
+          this.hasLoggedFrustumCull = true
+          const bounds = node.bounds
+          const center = new THREE.Vector3()
+          bounds.getCenter(center)
+          console.log(`[COPCLODManager] 🎥 ROOT NODE NOT IN VIEW FRUSTUM`)
+          console.log(`  Node center: (${center.x.toFixed(2)}, ${center.y.toFixed(2)}, ${center.z.toFixed(2)})`)
+          console.log(`  Camera pos: (${camera.position.x.toFixed(2)}, ${camera.position.y.toFixed(2)}, ${camera.position.z.toFixed(2)})`)
+          console.log(`  💡 HINT: Data is at Lon -180°, Lat -55° (behind globe from current view)`)
+          console.log(`  💡 SOLUTION: Rotate the globe to bring data into view`)
+        }
+        return
+      }
+
+      // Reset frustum cull flag when node comes into view
+      if (node.depth === 0 && this.hasLoggedFrustumCull) {
+        this.hasLoggedFrustumCull = false
+        console.log(`[COPCLODManager] ✅ Data now in view! Loading points...`)
+      }
+    } else {
+      // Log that frustum culling is disabled (once)
+      if (node.depth === 0 && !this.hasLoggedFrustumCull) {
+        this.hasLoggedFrustumCull = true
+        console.log(`[COPCLODManager] ℹ️  Frustum culling temporarily disabled`)
+        console.log(`  All visible nodes will be loaded regardless of camera view`)
+        console.log(`  This allows data to render while coordinate system is being fixed`)
+      }
+    }
+
+    // Check if node intersects with spatial bounds filter
+    if (!this.nodeIntersectsSpatialBounds(node)) {
+      // Outside spatial filter - unload if loaded
       if (node.loaded) {
         this.unloadNode(node)
+      }
+
+      // Log node pruning for debugging (only log occasionally to avoid spam)
+      if (this.spatialBounds?.enabled && node.depth === 0) {
+        const bounds = node.bounds
+        const filter = this.spatialBounds
+        console.log(`[COPCLODManager] 🚫 ROOT NODE SKIPPED - outside spatial bounds`)
+        console.log(`  Node bounds: Lon [${bounds.min.x.toFixed(2)}, ${bounds.max.x.toFixed(2)}], Lat [${bounds.min.y.toFixed(2)}, ${bounds.max.y.toFixed(2)}], Alt [${bounds.min.z.toFixed(2)}, ${bounds.max.z.toFixed(2)}] km`)
+        console.log(`  Filter:      Lon [${filter.minLon.toFixed(2)}, ${filter.maxLon.toFixed(2)}], Lat [${filter.minLat.toFixed(2)}, ${filter.maxLat.toFixed(2)}], Alt [${filter.minAlt.toFixed(2)}, ${filter.maxAlt.toFixed(2)}] km`)
+        console.log(`  ⚠️  DATA LOCATION MISMATCH! Adjust your filter to include the data region.`)
+        console.log(`  💡 HINT: Set Lat to -60 to -50, Alt to 0 to 10 km`)
       }
       return
     }
@@ -236,18 +384,42 @@ export class COPCLODManager {
       const childrenExist = childKeys.every(key => this.nodes.has(key))
 
       if (childrenExist) {
-        // Unload this node and traverse children
-        if (node.loaded) {
-          this.unloadNode(node)
-        }
-
+        // Try to traverse to children
+        let anyChildVisible = false
         for (const childKey of childKeys) {
           const childNode = this.nodes.get(childKey)
           if (childNode) {
-            await this.traverseOctree(childNode, camera, frustum)
+            // Check if child would be visible before traversing
+            if (frustum.intersectsBox(childNode.bounds) && this.nodeIntersectsSpatialBounds(childNode)) {
+              anyChildVisible = true
+              break
+            }
           }
         }
-        return
+
+        // Only traverse children if at least one is potentially visible
+        if (anyChildVisible) {
+          const pointCountBeforeChildren = this.currentPointCount
+
+          for (const childKey of childKeys) {
+            const childNode = this.nodes.get(childKey)
+            if (childNode) {
+              await this.traverseOctree(childNode, camera, frustum)
+            }
+          }
+
+          // Only unload parent if at least one child actually loaded
+          const childrenLoaded = this.currentPointCount > pointCountBeforeChildren
+          if (childrenLoaded && node.loaded) {
+            this.unloadNode(node)
+            return
+          }
+
+          if (childrenLoaded) {
+            return // Children loaded, don't load parent
+          }
+        }
+        // If no children are visible, fall through to load parent
       }
     }
 
@@ -268,7 +440,11 @@ export class COPCLODManager {
     // Screen space error threshold
     // If node is close enough, we want higher detail (children)
     const threshold = nodeSize / distance
-    return threshold > 0.01 // Adjust this value to control LOD aggressiveness
+    // AGGRESSIVE: Always refine to at least depth 4 to show more data immediately
+    if (node.depth < 4) {
+      return true // Always refine first 4 levels
+    }
+    return threshold > 0.1 // Much more aggressive than 0.01
   }
 
   /**
@@ -296,7 +472,13 @@ export class COPCLODManager {
   private async loadNode(node: COPCNode): Promise<void> {
     if (node.loaded) return
 
-    console.log(`[COPCLODManager] Loading node ${node.key}, points: ${node.pointCount}`)
+    const filteringEnabled = (this.spatialBounds?.enabled || this.heightFilter?.enabled || this.timeRange?.enabled)
+
+    if (filteringEnabled) {
+      console.log(`[COPCLODManager] 📦 Loading node ${node.key} (${node.pointCount.toLocaleString()} points) with filters...`)
+    } else {
+      console.log(`[COPCLODManager] 📦 Loading node ${node.key} (${node.pointCount.toLocaleString()} points)`)
+    }
 
     try {
       // Get the actual node data from hierarchy
@@ -307,13 +489,14 @@ export class COPCLODManager {
       }
 
       // Load point data
-      const view = await Copc.loadPointDataView(this.filename, this.copc, hierarchyNode)
+      const view = await Copc.loadPointDataView(this.getter, this.copc, hierarchyNode)
 
       // Extract point data
       const count = node.pointCount
       const positions = new Float32Array(count * 3)
       const intensities = new Uint16Array(count)
       const classifications = new Uint8Array(count)
+      const gpsTimes = new Float64Array(count)
 
       // Create getters for dimensions
       const getX = view.getter('X')
@@ -321,6 +504,7 @@ export class COPCLODManager {
       const getZ = view.getter('Z')
       const getIntensity = view.getter('Intensity')
       const getClassification = view.getter('Classification')
+      const getGpsTime = view.getter('GpsTime')
 
       // Apply scale and offset from header
       const scale = this.copc.header.scale
@@ -339,9 +523,28 @@ export class COPCLODManager {
         const y = rawY * scale[1] + offset[1]
         const z = rawZ * scale[2] + offset[2]
 
-        // Apply height filter if enabled
+        // Get GPS time (TAI93 - seconds since 1993-01-01)
+        const gpsTime = getGpsTime(i)
+
+        // Apply spatial bounds filter if enabled (additional per-point check)
+        if (this.spatialBounds && this.spatialBounds.enabled) {
+          if (x < this.spatialBounds.minLon || x > this.spatialBounds.maxLon ||
+              y < this.spatialBounds.minLat || y > this.spatialBounds.maxLat ||
+              z < this.spatialBounds.minAlt || z > this.spatialBounds.maxAlt) {
+            continue // Skip this point
+          }
+        }
+
+        // Apply height filter if enabled (backward compatibility)
         if (this.heightFilter && this.heightFilter.enabled) {
           if (z < this.heightFilter.min || z > this.heightFilter.max) {
+            continue // Skip this point
+          }
+        }
+
+        // Apply GPS time filter if enabled
+        if (this.timeRange && this.timeRange.enabled) {
+          if (gpsTime < this.timeRange.minGpsTime || gpsTime > this.timeRange.maxGpsTime) {
             continue // Skip this point
           }
         }
@@ -352,6 +555,7 @@ export class COPCLODManager {
 
         intensities[validPoints] = getIntensity(i)
         classifications[validPoints] = getClassification(i)
+        gpsTimes[validPoints] = gpsTime
 
         validPoints++
       }
@@ -360,28 +564,102 @@ export class COPCLODManager {
       const finalPositions = validPoints < count ? positions.slice(0, validPoints * 3) : positions
       const finalIntensities = validPoints < count ? intensities.slice(0, validPoints) : intensities
       const finalClassifications = validPoints < count ? classifications.slice(0, validPoints) : classifications
+      const finalGpsTimes = validPoints < count ? gpsTimes.slice(0, validPoints) : gpsTimes
+
+      // Log filtering statistics
+      if (filteringEnabled && validPoints < count) {
+        const filteredCount = count - validPoints
+        const filterPercent = ((filteredCount / count) * 100).toFixed(1)
+        console.log(`[COPCLODManager] ✂️  Point-level filtering applied to node ${node.key}:`)
+        console.log(`  • Original points in node: ${count.toLocaleString()}`)
+        console.log(`  • Points after filtering:  ${validPoints.toLocaleString()}`)
+        console.log(`  • Points filtered out:     ${filteredCount.toLocaleString()} (${filterPercent}%)`)
+        console.log(`  ⚡ Only ${validPoints.toLocaleString()} points loaded into memory!`)
+      } else if (validPoints === count) {
+        console.log(`[COPCLODManager] ✅ Node ${node.key}: All ${validPoints.toLocaleString()} points within filter bounds`)
+      }
+
+      // Convert geographic coordinates (lon, lat, alt) to Cartesian (x, y, z) for THREE.js
+      const cartesianPositions = new Float32Array(validPoints * 3)
+
+      for (let i = 0; i < validPoints; i++) {
+        const lon = finalPositions[i * 3]
+        const lat = finalPositions[i * 3 + 1]
+        const alt = finalPositions[i * 3 + 2]
+
+        // Use proven coordinate conversion from coordinateConversion.ts
+        // Includes: spherical coords, 15x altitude exaggeration, correct Z-axis negation
+        const pos = latLonAltToVector3(lat, lon, alt, 15.0)
+
+        cartesianPositions[i * 3] = pos.x
+        cartesianPositions[i * 3 + 1] = pos.y
+        cartesianPositions[i * 3 + 2] = pos.z
+      }
 
       // Compute colors based on current color mode
       const colors = new Uint8Array(validPoints * 3)
       this.computeColors(finalPositions, finalIntensities, finalClassifications, colors)
 
-      // Store point data
+      // Store point data (keeping original geographic coords for reference)
       node.pointData = {
-        positions: finalPositions,
+        positions: finalPositions, // Original geographic coords
         colors,
         intensities: finalIntensities,
-        classifications: finalClassifications
+        classifications: finalClassifications,
+        gpsTimes: finalGpsTimes
       }
 
-      // Create Three.js geometry
+      // Track first and last points for satellite animation (based on GPS time)
+      if (finalGpsTimes.length > 0) {
+        // Find min and max GPS times in this node
+        let minGpsTime = Infinity
+        let maxGpsTime = -Infinity
+        let minIdx = 0
+        let maxIdx = 0
+
+        for (let i = 0; i < finalGpsTimes.length; i++) {
+          if (finalGpsTimes[i] < minGpsTime) {
+            minGpsTime = finalGpsTimes[i]
+            minIdx = i
+          }
+          if (finalGpsTimes[i] > maxGpsTime) {
+            maxGpsTime = finalGpsTimes[i]
+            maxIdx = i
+          }
+        }
+
+        // Update global first point if this is earlier
+        if (!this.firstPoint || minGpsTime < this.firstPoint.gpsTime) {
+          this.firstPoint = {
+            lon: finalPositions[minIdx * 3],
+            lat: finalPositions[minIdx * 3 + 1],
+            alt: finalPositions[minIdx * 3 + 2],
+            gpsTime: minGpsTime
+          }
+        }
+
+        // Update global last point if this is later
+        if (!this.lastPoint || maxGpsTime > this.lastPoint.gpsTime) {
+          this.lastPoint = {
+            lon: finalPositions[maxIdx * 3],
+            lat: finalPositions[maxIdx * 3 + 1],
+            alt: finalPositions[maxIdx * 3 + 2],
+            gpsTime: maxGpsTime
+          }
+        }
+      }
+
+      // Create Three.js geometry with Cartesian positions
       const geometry = new THREE.BufferGeometry()
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(finalPositions, 3))
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(cartesianPositions, 3))
       geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3, true)) // normalized
 
       const material = new THREE.PointsMaterial({
-        size: this.pointSize,
+        size: this.pointSize * 0.002, // Scale to match globe size
         vertexColors: true,
-        sizeAttenuation: true
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.8
       })
 
       const points = new THREE.Points(geometry, material)
@@ -390,10 +668,20 @@ export class COPCLODManager {
       node.points = points
       node.loaded = true
 
+      // Pause rendering before adding to scene (prevents buffer corruption)
+      if (this.pauseRendering) {
+        this.pauseRendering()
+      }
+
       // Add to scene
       this.scene.add(points)
 
-      console.log(`[COPCLODManager] Loaded node ${node.key}, valid points: ${validPoints}/${count}`)
+      // Resume rendering after adding
+      if (this.resumeRendering) {
+        this.resumeRendering()
+      }
+
+      console.log(`[COPCLODManager] ✨ Node ${node.key} added to scene with ${validPoints.toLocaleString()} points (Cartesian coords)`)
     } catch (error) {
       console.error(`[COPCLODManager] Failed to load node ${node.key}:`, error)
     }
@@ -406,7 +694,7 @@ export class COPCLODManager {
     // Re-load the hierarchy to get the actual node object
     // This is needed because copc.js returns node metadata separately
     const { nodes } = await Copc.loadHierarchyPage(
-      this.filename,
+      this.getter,
       this.copc.info.rootHierarchyPage
     )
 
@@ -421,8 +709,18 @@ export class COPCLODManager {
 
     console.log(`[COPCLODManager] Unloading node ${node.key}`)
 
+    // Pause rendering before removing from scene (prevents buffer corruption)
+    if (this.pauseRendering) {
+      this.pauseRendering()
+    }
+
     // Remove from scene
     this.scene.remove(node.points)
+
+    // Resume rendering after removing
+    if (this.resumeRendering) {
+      this.resumeRendering()
+    }
 
     // Dispose geometry and material
     node.points.geometry.dispose()
@@ -530,10 +828,100 @@ export class COPCLODManager {
   }
 
   /**
+   * Update spatial bounds filter and reload affected nodes
+   */
+  setSpatialBounds(bounds: SpatialBounds | null): void {
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+    console.log('[COPCLODManager] 📍 SPATIAL BOUNDS FILTER APPLIED')
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+
+    if (bounds && bounds.enabled) {
+      console.log(`[COPCLODManager] 🔍 Selective loading enabled for file: ${this.filename}`)
+      console.log(`[COPCLODManager] 📊 Filter parameters:`)
+      console.log(`  • Longitude range: ${bounds.minLon.toFixed(2)}° to ${bounds.maxLon.toFixed(2)}°`)
+      console.log(`  • Latitude range:  ${bounds.minLat.toFixed(2)}° to ${bounds.maxLat.toFixed(2)}°`)
+      console.log(`  • Altitude range:  ${bounds.minAlt.toFixed(2)} to ${bounds.maxAlt.toFixed(2)} km`)
+      console.log(`[COPCLODManager] ⚡ Octree optimization: Only nodes intersecting filter bounds will be loaded`)
+      console.log(`[COPCLODManager] 💾 HTTP Range requests will fetch ONLY relevant octree nodes`)
+      console.log(`[COPCLODManager] ❌ NOT loading entire file - using COPC octree structure for efficiency`)
+    } else {
+      console.log(`[COPCLODManager] 📂 Spatial filter disabled - loading all visible data`)
+    }
+
+    this.spatialBounds = bounds
+
+    // Unload all nodes - they will be reloaded with new filter
+    const unloadedCount = Array.from(this.nodes.values()).filter(n => n.loaded).length
+    if (unloadedCount > 0) {
+      console.log(`[COPCLODManager] 🔄 Unloading ${unloadedCount} previously loaded nodes to apply new filter`)
+    }
+
+    for (const node of this.nodes.values()) {
+      if (node.loaded) {
+        this.unloadNode(node)
+      }
+    }
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n')
+  }
+
+  /**
+   * Update GPS time range filter and reload affected nodes
+   */
+  setTimeRange(range: TimeRange | null): void {
+    this.timeRange = range
+
+    // Unload all nodes - they will be reloaded with new filter
+    for (const node of this.nodes.values()) {
+      if (node.loaded) {
+        this.unloadNode(node)
+      }
+    }
+  }
+
+  /**
    * Update data range for color mapping
    */
   setDataRange(range: { elevation: [number, number], intensity: [number, number] }): void {
     this.dataRange = range
+  }
+
+  /**
+   * Get data bounds from COPC header
+   */
+  getDataBounds(): {
+    spatial: { minLon: number, maxLon: number, minLat: number, maxLat: number, minAlt: number, maxAlt: number } | null,
+    time: { minGpsTime: number, maxGpsTime: number } | null
+  } {
+    if (!this.copc) {
+      return { spatial: null, time: null }
+    }
+
+    return {
+      spatial: {
+        minLon: this.copc.header.min[0],
+        maxLon: this.copc.header.max[0],
+        minLat: this.copc.header.min[1],
+        maxLat: this.copc.header.max[1],
+        minAlt: this.copc.header.min[2],
+        maxAlt: this.copc.header.max[2]
+      },
+      time: null // GPS time range not available in header, would need to scan data
+    }
+  }
+
+  /**
+   * Get first point (for satellite animation)
+   */
+  getFirstPoint(): { lon: number, lat: number, alt: number, gpsTime: number } | null {
+    return this.firstPoint
+  }
+
+  /**
+   * Get last point (for satellite animation)
+   */
+  getLastPoint(): { lon: number, lat: number, alt: number, gpsTime: number } | null {
+    return this.lastPoint
   }
 
   /**

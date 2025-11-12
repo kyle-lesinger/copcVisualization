@@ -1,5 +1,6 @@
-import { FileMode } from '../App'
 import './FileSelector.css'
+
+type FileMode = 'single' | 'tiled'
 
 interface FileSelectorProps {
   fileMode: FileMode

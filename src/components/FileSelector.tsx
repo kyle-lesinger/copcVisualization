@@ -35,7 +35,7 @@ export default function FileSelector({
 
   return (
     <div className="panel file-selector">
-      <h3>COPC Files</h3>
+      <h3>Potree Files</h3>
 
       <div className="file-mode-selector">
         <label>

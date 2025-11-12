@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import * as THREE from 'three'
 import { ColorMode, Colormap, DataRange, ViewMode, HeightFilter, SpatialBoundsFilter } from '../App'
+import { PotreeLODManager, SpatialBounds, TimeRange } from '../utils/potreeLoaderLOD'
 import {
-  loadCOPCFile,
-  PointCloudData,
+  loadPotreeData,
+  PointCloudData
+} from '../utils/potreeLoader'
+import {
   computeElevationColors,
   computeIntensityColors,
   computeClassificationColors
-} from '../utils/copcLoader'
-import { COPCLODManager, SpatialBounds } from '../utils/copcLoaderLOD'
+} from '../utils/copcLoader' // Keep color computation functions
 import { convertPointsToGlobe, convertPointsTo2D, haversineDistance, calculateBearing, calculatePointAtDistanceAndBearing } from '../utils/coordinateConversion'
 import { LatLon, filterDataByAOI } from '../utils/aoiSelector'
 import GlobeViewer, { GlobeViewerHandle } from './GlobeViewer'
@@ -46,7 +48,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
   const deckMapRef = useRef<DeckGLMapViewHandle>(null)
   const pointCloudsRef = useRef<THREE.Points[]>([]) // For 2D mode only
   const dataRef = useRef<PointCloudData[]>([]) // For 2D mode only
-  const lodManagersRef = useRef<COPCLODManager[]>([]) // For 3D mode with LOD
+  const lodManagersRef = useRef<PotreeLODManager[]>([]) // For 3D mode with LOD (Potree)
   const displayedPositionsRef = useRef<Float32Array | null>(null) // Track decimated positions for satellite animation
   const originalPositionsRef = useRef<Float32Array | null>(null) // Store ORIGINAL unfiltered positions for satellite path
   const lastCameraDistanceRef = useRef<number>(3.0) // Default camera distance
@@ -702,9 +704,9 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
     }
 
     console.log('╔═══════════════════════════════════════════════════════════╗')
-    console.log('║     📂 LOADING WITH LOD MANAGER (OCTREE OPTIMIZED)        ║')
+    console.log('║     📂 LOADING WITH LOD MANAGER (POTREE OCTREE)           ║')
     console.log('╚═══════════════════════════════════════════════════════════╝')
-    console.log(`[PointCloudViewer] Loading ${files.length} file(s) with COPCLODManager`)
+    console.log(`[PointCloudViewer] Loading ${files.length} file(s) with PotreeLODManager`)
 
     if (spatialBoundsFilter?.enabled) {
       console.log(`[PointCloudViewer] 🗺️  Spatial bounds filter ENABLED:`)
@@ -724,7 +726,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
           const pauseRendering = () => globeRef.current?.pauseRendering()
           const resumeRendering = () => globeRef.current?.resumeRendering()
 
-          const manager = new COPCLODManager(file, scene, pauseRendering, resumeRendering)
+          const manager = new PotreeLODManager(file, scene, pauseRendering, resumeRendering)
           await manager.initialize()
 
           // Apply spatial bounds if enabled
@@ -741,24 +743,33 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
             manager.setSpatialBounds(bounds)
           }
 
-          // Set color mode and point size
-          manager.setColorMode(colorMode, colormap)
-          manager.setPointSize(pointSize * 0.002) // Scale for globe
+          // Get data range from manager and update rendering params
+          const dataBounds = manager.getDataBounds()
+          let dataRangeToUse: { elevation: [number, number], intensity: [number, number] }
 
-          // Get data range from first manager
-          if (index === 0) {
-            const dataBounds = manager.getDataBounds()
-            if (dataBounds.spatial) {
-              const ranges: DataRange = {
-                elevation: [dataBounds.spatial.minAlt, dataBounds.spatial.maxAlt],
-                intensity: [0, 3.5] // CALIPSO intensity range
-              }
-              setGlobalRanges(ranges)
-              setFilteredRanges(ranges)
-              onGlobalDataRangeUpdate(ranges)
-              onDataRangeUpdate(ranges)
+          if (dataBounds.spatial) {
+            dataRangeToUse = {
+              elevation: [dataBounds.spatial.minAlt, dataBounds.spatial.maxAlt],
+              intensity: [0, 3.5] // CALIPSO intensity range in km⁻¹·sr⁻¹
+            }
+
+            // Update global ranges from first manager
+            if (index === 0) {
+              setGlobalRanges(dataRangeToUse)
+              setFilteredRanges(dataRangeToUse)
+              onGlobalDataRangeUpdate(dataRangeToUse)
+              onDataRangeUpdate(dataRangeToUse)
+            }
+          } else {
+            // Fallback to default ranges
+            dataRangeToUse = {
+              elevation: [0, 40],
+              intensity: [0, 3.5]
             }
           }
+
+          // Update rendering params with correct data range
+          manager.updateRenderingParams(colorMode, colormap, pointSize * 0.002, dataRangeToUse)
 
           // Get first/last points for satellite animation
           const firstPt = manager.getFirstPoint()
@@ -839,10 +850,10 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
     }
   }, [files, spatialBoundsFilter, colorMode, colormap, pointSize, onGlobalDataRangeUpdate, onDataRangeUpdate])
 
-  // Load COPC files
+  // Load Potree files
   useEffect(() => {
     if (files.length === 0) {
-      // Clean up LOD managers
+      // Clean up Potree LOD managers
       lodManagersRef.current.forEach(m => m.dispose())
       lodManagersRef.current = []
 
@@ -905,7 +916,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
 
     // Log file loading with filter context
     console.log('╔═══════════════════════════════════════════════════════════╗')
-    console.log('║         📂 LOADING COPC FILES WITH ACTIVE FILTERS         ║')
+    console.log('║        📂 LOADING POTREE FILES WITH ACTIVE FILTERS        ║')
     console.log('╚═══════════════════════════════════════════════════════════╝')
     console.log(`[PointCloudViewer] 📁 Loading ${files.length} file(s):`)
     files.forEach((file, idx) => {
@@ -919,7 +930,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
       console.log(`    • Lon: ${spatialBoundsFilter.minLon.toFixed(2)}° to ${spatialBoundsFilter.maxLon.toFixed(2)}°`)
       console.log(`    • Lat: ${spatialBoundsFilter.minLat.toFixed(2)}° to ${spatialBoundsFilter.maxLat.toFixed(2)}°`)
       console.log(`    • Alt: ${spatialBoundsFilter.minAlt.toFixed(2)} to ${spatialBoundsFilter.maxAlt.toFixed(2)} km`)
-      console.log(`\n[PointCloudViewer] ⚡ COPC Octree Optimization:`)
+      console.log(`\n[PointCloudViewer] ⚡ Potree Octree Optimization:`)
       console.log(`  • Only octree nodes intersecting the spatial bounds will be loaded`)
       console.log(`  • Individual points will be filtered per-node`)
       console.log(`  • HTTP Range requests will fetch ONLY necessary data chunks`)
@@ -937,12 +948,22 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
     // Load all files
     Promise.all(
       files.map((file, index) =>
-        loadCOPCFile(file, (progress) => {
-          setLoadingProgress((prev) => {
-            const fileProgress = progress / files.length
-            const previousFilesProgress = index / files.length
-            return Math.min(100, (previousFilesProgress + fileProgress) * 100)
-          })
+        loadPotreeData(file, {
+          onProgress: (progress) => {
+            setLoadingProgress((prev) => {
+              const fileProgress = progress / files.length
+              const previousFilesProgress = index / files.length
+              return Math.min(100, (previousFilesProgress + fileProgress) * 100)
+            })
+          },
+          spatialBounds: spatialBoundsFilter?.enabled ? {
+            minLon: spatialBoundsFilter.minLon,
+            maxLon: spatialBoundsFilter.maxLon,
+            minLat: spatialBoundsFilter.minLat,
+            maxLat: spatialBoundsFilter.maxLat,
+            minAlt: spatialBoundsFilter.minAlt,
+            maxAlt: spatialBoundsFilter.maxAlt
+          } : undefined
         })
       )
     )
@@ -1212,8 +1233,8 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
         }
       })
       .catch((err) => {
-        console.error('Error loading COPC files:', err)
-        setError(err.message || 'Failed to load COPC files')
+        console.error('Error loading Potree files:', err)
+        setError(err.message || 'Failed to load Potree files')
         setLoading(false)
       })
   }, [files, pointSize, onGlobalDataRangeUpdate, onDataRangeUpdate, viewMode, colorMode, colormap])
@@ -1945,7 +1966,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
         <div className="loading-overlay">
           <div className="loading-spinner" />
           <div className="loading-text">
-            Loading COPC files... {Math.round(loadingProgress)}%
+            Loading Potree files... {Math.round(loadingProgress)}%
           </div>
         </div>
       )}

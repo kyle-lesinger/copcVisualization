@@ -22,7 +22,7 @@ export interface FileSearchConfig {
 }
 
 /**
- * Search for CALIPSO COPC files matching date range and band type
+ * Search for CALIPSO Potree directories matching date range and band type
  *
  * This function can work with three different file sources:
  * 1. API endpoint (queries backend for file list)
@@ -36,7 +36,7 @@ export async function searchCalipsoFiles(
   config: FileSearchConfig = {}
 ): Promise<FileSearchResult> {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-  console.log('[FileSearch] 🔍 SEARCHING FOR CALIPSO FILES')
+  console.log('[FileSearch] 🔍 SEARCHING FOR POTREE DIRECTORIES')
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
 
   const start = new Date(startDate)
@@ -124,9 +124,9 @@ function generateSearchPattern(bandType: BandType, startDate: Date, endDate: Dat
   }
 
   if (startStr === endStr) {
-    return `${basePattern}.${startStr}*${bandPattern}.copc.laz`
+    return `${basePattern}.${startStr}*${bandPattern}` // Potree directory names
   } else {
-    return `${basePattern}.{${startStr}..${endStr}}*${bandPattern}.copc.laz`
+    return `${basePattern}.{${startStr}..${endStr}}*${bandPattern}` // Potree directory names
   }
 }
 
@@ -181,23 +181,23 @@ function searchInFileList(
   startDate: Date,
   endDate: Date
 ): string[] {
-  console.log(`[FileSearch] 📋 Searching through ${fileList.length} available files`)
+  console.log(`[FileSearch] 📋 Searching through ${fileList.length} available Potree directories`)
   console.log(`[FileSearch] 📁 File source: Configured file list (see getAvailableFileList() in fileSearch.ts)`)
   console.log(`[FileSearch] 💡 To search different files, update getAvailableFileList() in src/utils/fileSearch.ts`)
 
   const results: string[] = []
 
   for (const filepath of fileList) {
-    const filename = filepath.split('/').pop() || filepath
+    const dirname = filepath.split('/').pop() || filepath
 
-    // Check if filename matches CALIPSO pattern
-    if (!filename.startsWith('CAL_LID_L1-Standard-V4-51')) {
+    // Check if directory name matches CALIPSO pattern
+    if (!dirname.startsWith('CAL_LID_L1-Standard-V4-51')) {
       continue
     }
 
-    // Extract date and band from filename
-    // Format: CAL_LID_L1-Standard-V4-51.2023-06-30T16-44-43ZD.copc.laz
-    const match = filename.match(/(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})Z([DN])/)
+    // Extract date and band from directory name
+    // Format: CAL_LID_L1-Standard-V4-51.2023-06-30T16-44-43ZD (Potree directory)
+    const match = dirname.match(/(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})Z([DN])/)
     if (!match) {
       continue
     }
@@ -254,18 +254,18 @@ export function parseCalipsoFilename(filename: string): {
  */
 export function getAvailableFileList(): string[] {
   // CONFIGURE THIS: Update with your actual file paths
-  // Files are served from public/output via symbolic link
-  // Accessible at /output/ from the web server
-  const dataDirectory = '/output' // Served via public/output symlink
+  // Potree directories contain metadata.json, octree.bin, and hierarchy.bin
+  // Each directory represents one converted CALIPSO file
+  const dataDirectory = '/potree_data' // Potree format directories
 
   return [
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T16-44-43ZD.copc.laz`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T17-37-28ZN.copc.laz`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T18-23-08ZD.copc.laz`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T19-15-53ZN.copc.laz`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T20-01-33ZD.copc.laz`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T20-54-18ZN.copc.laz`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T21-39-53ZD.copc.laz`,
+    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T16-44-43ZD`,
+    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T17-37-28ZN`,
+    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T18-23-08ZD`,
+    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T19-15-53ZN`,
+    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T20-01-33ZD`,
+    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T20-54-18ZN`,
+    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T21-39-53ZD`,
   ]
 }
 

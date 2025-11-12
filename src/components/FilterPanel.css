@@ -1,0 +1,33 @@
+.filter-panel {
+  top: 20px;
+  left: 20px;
+  max-width: 350px;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
+
+.filter-panel h3 {
+  margin: 0 0 16px 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: white;
+}
+
+/* Custom scrollbar for filter panel */
+.filter-panel::-webkit-scrollbar {
+  width: 8px;
+}
+
+.filter-panel::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+}
+
+.filter-panel::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+}
+
+.filter-panel::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}

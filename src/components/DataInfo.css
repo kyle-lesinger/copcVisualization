@@ -1,7 +1,7 @@
 .data-info-panel {
   position: fixed;
   bottom: 180px; /* Position above the controls panel */
-  left: 20px;
+  right: 20px;
   padding: 16px 20px;
   background: rgba(0, 0, 0, 0.8);
   backdrop-filter: blur(10px);

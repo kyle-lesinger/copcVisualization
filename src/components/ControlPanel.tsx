@@ -144,21 +144,10 @@ export default function ControlPanel({
         />
       </div>
 
-      <div className="control-group">
-        <label className="control-label">View Mode</label>
-        <button
-          className="control-button view-toggle"
-          onClick={() => {
-            const nextMode = viewMode === 'space' ? '2d' : 'space'
-            onViewModeChange(nextMode)
-          }}
-        >
-          {viewMode === 'space' ? '🗺️ 2D Map' : '🌍 Space View'}
-        </button>
-      </div>
+      {/* View mode removed - fixed to 2D only */}
 
-      {/* Ground Mode is only available in 2D view */}
-      {viewMode === '2d' && (
+      {/* Ground Mode */}
+      {(
         <div className="control-group">
           <label className="control-label">Ground View</label>
           <button

@@ -135,7 +135,9 @@ export class PotreeLODManager {
    * Load Potree hierarchy.bin file
    */
   private async loadHierarchy(): Promise<void> {
-    const hierarchyUrl = `${this.baseUrl}hierarchy.bin`
+    // Potree 2.0 standard structure
+    const normalizedBaseUrl = this.baseUrl.endsWith('/') ? this.baseUrl : `${this.baseUrl}/`
+    const hierarchyUrl = `${normalizedBaseUrl}pointclouds/index/hierarchy.bin`
     console.log('[PotreeLODManager] Loading hierarchy from:', hierarchyUrl)
 
     const response = await fetch(hierarchyUrl)
@@ -145,8 +147,6 @@ export class PotreeLODManager {
 
     const arrayBuffer = await response.arrayBuffer()
     this.parseHierarchy(arrayBuffer)
-
-    console.log('[PotreeLODManager] Loaded hierarchy nodes:', this.nodes.size)
   }
 
   /**
@@ -159,36 +159,59 @@ export class PotreeLODManager {
     }
 
     const view = new DataView(buffer)
-    const { firstChunkSize, stepSize } = this.metadata.hierarchy
 
-    let offset = 0
-    let byteOffset = 0 // Track offset in octree.bin
+    // Potree 2.0 format: each node is 22 bytes
+    // Format: type (1) + childMask (1) + pointCount (4) + byteOffset (8) + byteSize (8)
+    const nodeSize = 22
+    const numNodes = Math.floor(buffer.byteLength / nodeSize)
 
-    // Parse hierarchy nodes
-    // Each node has: type (1 byte), childMask (1 byte), pointCount (4 bytes), byteSize (4 bytes)
-    const nodeSize = 10 // bytes per node entry in hierarchy
+    // First pass: Read all node data
+    interface NodeData {
+      type: number
+      childMask: number
+      pointCount: number
+      byteOffset: number
+      byteSize: number
+    }
+    const nodeDataArray: NodeData[] = []
 
-    let nodeCount = 0
-    while (offset < buffer.byteLength) {
+    for (let i = 0; i < numNodes; i++) {
+      const offset = i * nodeSize
+
       const type = view.getUint8(offset)
       const childMask = view.getUint8(offset + 1)
       const pointCount = view.getUint32(offset + 2, true)
-      const byteSize = view.getUint32(offset + 6, true)
+
+      const byteOffsetLow = view.getUint32(offset + 6, true)
+      const byteOffsetHigh = view.getUint32(offset + 10, true)
+      const byteOffset = byteOffsetLow + (byteOffsetHigh * 0x100000000)
+
+      const byteSizeLow = view.getUint32(offset + 14, true)
+      const byteSizeHigh = view.getUint32(offset + 18, true)
+      const byteSize = byteSizeLow + (byteSizeHigh * 0x100000000)
+
+      nodeDataArray.push({ type, childMask, pointCount, byteOffset, byteSize })
 
       // Debug first 5 nodes
-      if (nodeCount < 5) {
-        console.log(`[PotreeLODManager] Node ${nodeCount}: type=${type}, childMask=${childMask}, pointCount=${pointCount}, byteSize=${byteSize}, byteOffset=${byteOffset}`)
+      if (i < 5) {
+        console.log(`[PotreeLODManager] Node ${i}: type=${type}, childMask=${childMask}, pointCount=${pointCount}, byteSize=${byteSize}, byteOffset=${byteOffset}`)
       }
+    }
 
-      // Generate node name based on position in hierarchy
-      // This is simplified - actual Potree uses octree naming (r, r0, r1, ..., r01, r02, etc.)
-      const depth = Math.floor(Math.log2(this.nodes.size + 1))
-      const nodeName = this.nodes.size === 0 ? 'r' : `r${this.nodes.size.toString(8)}` // Use octal for simplicity
+    // Second pass: Build octree structure with proper names
+    // Nodes are stored in breadth-first order
+    // We need to assign names based on the tree structure
+    const nameQueue: string[] = ['r'] // Start with root
+    let nodeIndex = 0
 
-      nodeCount++
+    while (nodeIndex < nodeDataArray.length && nameQueue.length > 0) {
+      const nodeName = nameQueue.shift()! // Get next name from queue
+      const nodeData = nodeDataArray[nodeIndex]
 
-      // Calculate bounds (simplified - using metadata bounds for all nodes for now)
-      // TODO: Implement proper octree subdivision for child bounds
+      // Calculate depth from name
+      const depth = nodeName === 'r' ? 0 : nodeName.length - 1
+
+      // Calculate bounds (simplified - using metadata bounds for all nodes)
       const bounds = new THREE.Box3(
         new THREE.Vector3(...this.metadata!.boundingBox.min),
         new THREE.Vector3(...this.metadata!.boundingBox.max)
@@ -197,18 +220,21 @@ export class PotreeLODManager {
       const node: PotreeNode = {
         name: nodeName,
         depth,
-        pointCount,
+        pointCount: nodeData.pointCount,
         bounds,
         loaded: false,
-        byteOffset,
-        byteSize,
+        byteOffset: nodeData.byteOffset,
+        byteSize: nodeData.byteSize,
         children: []
       }
 
-      // Parse child mask to determine children
+      // Parse child mask to determine which children exist
+      // Add them to the name queue in order (0-7)
       for (let i = 0; i < 8; i++) {
-        if (childMask & (1 << i)) {
-          node.children!.push(`${nodeName}${i}`)
+        if (nodeData.childMask & (1 << i)) {
+          const childName = `${nodeName}${i}`
+          node.children!.push(childName)
+          nameQueue.push(childName)
         }
       }
 
@@ -219,9 +245,15 @@ export class PotreeLODManager {
         this.rootNode = node
       }
 
-      offset += nodeSize
-      byteOffset += byteSize
+      // Debug first 10 nodes to verify structure
+      if (nodeIndex < 10) {
+        console.log(`[PotreeLODManager] Created node "${nodeName}" (index ${nodeIndex}): ${nodeData.pointCount} points, children: [${node.children.join(', ')}]`)
+      }
+
+      nodeIndex++
     }
+
+    console.log(`[PotreeLODManager] Loaded hierarchy nodes: ${this.nodes.size}`)
   }
 
   /**
@@ -294,23 +326,30 @@ export class PotreeLODManager {
     node.bounds.getCenter(nodeCenter)
     const distance = camera.position.distanceTo(nodeCenter)
 
-    // Determine if we should load this node's children
+    // Determine if we should load this node's children based on LOD
     const nodeSize = node.bounds.getSize(new THREE.Vector3()).length()
-    const screenSpaceError = (nodeSize / distance) * 1000 // Simplified metric
+    const screenSpaceError = (nodeSize / distance) * 1000
 
-    // TEMPORARY: Only load root node for now to test basic loading
-    // TODO: Fix hierarchy node naming and implement proper octree child traversal
-    if (node.name !== 'r') {
-      return
-    }
+    // Use more aggressive LOD - only load children if we're very close
+    const shouldLoadChildren = screenSpaceError > 100 && node.children && node.children.length > 0
 
-    // Load root node
-    if (!node.loaded && this.currentPointCount < this.pointBudget) {
-      await this.loadNode(node)
-    }
+    if (shouldLoadChildren) {
+      // Load children nodes instead
+      for (const childName of node.children!) {
+        const childNode = this.nodes.get(childName)
+        if (childNode) {
+          await this.traverseOctree(childNode, camera, frustum)
+        }
+      }
+    } else {
+      // Load this node if within budget
+      if (!node.loaded && this.currentPointCount < this.pointBudget) {
+        await this.loadNode(node)
+      }
 
-    if (node.loaded) {
-      this.currentPointCount += node.pointCount
+      if (node.loaded) {
+        this.currentPointCount += node.pointCount
+      }
     }
   }
 
@@ -321,6 +360,22 @@ export class PotreeLODManager {
     if (!this.metadata) return
 
     console.log(`[PotreeLODManager] Loading node: ${node.name}`)
+
+    // Validate node has points and reasonable byteSize
+    if (node.pointCount === 0 || node.byteSize === 0) {
+      console.warn(`[PotreeLODManager] Skipping node ${node.name}: no points or zero byteSize`)
+      node.loaded = true // Mark as loaded to prevent retries
+      return
+    }
+
+    // Sanity check: byteOffset + byteSize should be reasonable (< 10GB)
+    const maxFileSize = 10 * 1024 * 1024 * 1024 // 10 GB
+    if (node.byteOffset + node.byteSize > maxFileSize) {
+      console.error(`[PotreeLODManager] Invalid byte range for node ${node.name}: offset=${node.byteOffset}, size=${node.byteSize}`)
+      console.error('[PotreeLODManager] This suggests corrupted hierarchy data - skipping node')
+      node.loaded = true // Mark as loaded to prevent infinite retries
+      return
+    }
 
     try {
       // Load point data from octree.bin using HTTP Range request
@@ -338,9 +393,11 @@ export class PotreeLODManager {
       }
 
       // Apply spatial bounds filter (point-level filtering)
-      if (this.spatialBounds && this.spatialBounds.enabled) {
-        pointData = this.applySpatialBoundsFilter(pointData)
-      }
+      // TEMPORARILY DISABLED FOR DEBUGGING - TO SEE ALL DATA
+      // if (this.spatialBounds && this.spatialBounds.enabled) {
+      //   pointData = this.applySpatialBoundsFilter(pointData)
+      // }
+      console.log(`[PotreeLODManager] Node ${node.name}: Loaded ${pointData.pointCount} points (spatial filtering DISABLED)`)
 
       // Apply height filter
       let filteredData = pointData
@@ -402,6 +459,8 @@ export class PotreeLODManager {
       node.loaded = true
     } catch (error) {
       console.error(`[PotreeLODManager] Failed to load node ${node.name}:`, error)
+      // Mark as loaded to prevent infinite retry loop
+      node.loaded = true
     }
   }
 

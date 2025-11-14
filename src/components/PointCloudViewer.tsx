@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import * as THREE from 'three'
 import { ColorMode, Colormap, DataRange, ViewMode, HeightFilter, SpatialBoundsFilter } from '../App'
-import { PotreeLODManager, SpatialBounds, TimeRange } from '../utils/potreeLoaderLOD'
+import { COPCLODManager, SpatialBounds, TimeRange } from '../utils/copcLoaderLOD'
 import {
   loadPotreeData,
   PointCloudData
@@ -13,7 +13,7 @@ import {
 } from '../utils/copcLoader' // Keep color computation functions
 import { convertPointsToGlobe, convertPointsTo2D, haversineDistance, calculateBearing, calculatePointAtDistanceAndBearing } from '../utils/coordinateConversion'
 import { LatLon, filterDataByAOI } from '../utils/aoiSelector'
-import GlobeViewer, { GlobeViewerHandle } from './GlobeViewer'
+// GlobeViewer removed - 2D mode only
 import DeckGLMapView, { DeckGLMapViewHandle } from './DeckGLMapView'
 import AOIScatterPlot from './AOIScatterPlot'
 import './PointCloudViewer.css'
@@ -44,11 +44,11 @@ interface PointCloudViewerProps {
 }
 
 export default function PointCloudViewer({ files, colorMode, colormap, pointSize, viewMode, onGlobalDataRangeUpdate, onDataRangeUpdate, aoiPolygon, showScatterPlotTrigger, onAOIDataReady, onPolygonUpdate, isDrawingAOI, onAnimateSatelliteTrigger, onFirstPointUpdate, onLastPointUpdate, onCurrentGpsTimeUpdate, onCurrentPositionUpdate, heightFilter, spatialBoundsFilter, isGroundModeActive, groundCameraPosition, onGroundCameraPositionSet }: PointCloudViewerProps) {
-  const globeRef = useRef<GlobeViewerHandle>(null)
+  // const globeRef = useRef<GlobeViewerHandle>(null) // Removed - 2D only
   const deckMapRef = useRef<DeckGLMapViewHandle>(null)
   const pointCloudsRef = useRef<THREE.Points[]>([]) // For 2D mode only
   const dataRef = useRef<PointCloudData[]>([]) // For 2D mode only
-  const lodManagersRef = useRef<PotreeLODManager[]>([]) // For 3D mode with LOD (Potree)
+  const lodManagersRef = useRef<COPCLODManager[]>([]) // For 3D mode with LOD (COPC)
   const displayedPositionsRef = useRef<Float32Array | null>(null) // Track decimated positions for satellite animation
   const originalPositionsRef = useRef<Float32Array | null>(null) // Store ORIGINAL unfiltered positions for satellite path
   const lastCameraDistanceRef = useRef<number>(3.0) // Default camera distance
@@ -704,9 +704,9 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
     }
 
     console.log('╔═══════════════════════════════════════════════════════════╗')
-    console.log('║     📂 LOADING WITH LOD MANAGER (POTREE OCTREE)           ║')
+    console.log('║     📂 LOADING WITH LOD MANAGER (COPC OCTREE)             ║')
     console.log('╚═══════════════════════════════════════════════════════════╝')
-    console.log(`[PointCloudViewer] Loading ${files.length} file(s) with PotreeLODManager`)
+    console.log(`[PointCloudViewer] Loading ${files.length} file(s) with COPCLODManager`)
 
     if (spatialBoundsFilter?.enabled) {
       console.log(`[PointCloudViewer] 🗺️  Spatial bounds filter ENABLED:`)
@@ -726,7 +726,7 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
           const pauseRendering = () => globeRef.current?.pauseRendering()
           const resumeRendering = () => globeRef.current?.resumeRendering()
 
-          const manager = new PotreeLODManager(file, scene, pauseRendering, resumeRendering)
+          const manager = new COPCLODManager(file, scene, pauseRendering, resumeRendering)
           await manager.initialize()
 
           // Apply spatial bounds if enabled
@@ -759,6 +759,16 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
               setFilteredRanges(dataRangeToUse)
               onGlobalDataRangeUpdate(dataRangeToUse)
               onDataRangeUpdate(dataRangeToUse)
+
+              // Auto-center camera on the data for better visibility
+              const center = manager.getGeographicCenter()
+              if (center && globeRef.current) {
+                console.log('🎯 Auto-centering camera on data:')
+                console.log(`  Geographic center: Lon=${center.lon.toFixed(4)}°, Lat=${center.lat.toFixed(4)}°, Alt=${center.alt.toFixed(2)}km`)
+                // Set camera to look at the data center from a distance
+                globeRef.current.setCameraState(2000, { lon: center.lon, lat: center.lat })
+                console.log('  Camera repositioned to view data location')
+              }
             }
           } else {
             // Fallback to default ranges
@@ -905,14 +915,8 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
     setError(null)
     setLoadingProgress(0)
 
-    // Choose loading method based on view mode
-    if (viewMode !== '2d') {
-      // 3D mode: Use LOD manager
-      loadWithLODManager()
-      return // Exit early, LOD manager handles everything
-    }
-
-    // 2D mode: Use simple loader (keep existing logic below)
+    // 2D mode only - always use Potree loader
+    // (COPC LOD manager removed)
 
     // Log file loading with filter context
     console.log('╔═══════════════════════════════════════════════════════════╗')
@@ -1925,42 +1929,29 @@ export default function PointCloudViewer({ files, colorMode, colormap, pointSize
 
   return (
     <div className="point-cloud-viewer">
-      {viewMode === '2d' ? (
-        <DeckGLMapView
-          key={mapViewKey}
-          ref={deckMapRef}
-          center={mapCenter}
-          zoom={mapZoom}
-          data={filteredDataForMap}
-          colorMode={colorMode}
-          colormap={colormap}
-          pointSize={pointSize}
-          dataVersion={dataVersion}
-          isDrawingAOI={isDrawingAOI}
-          aoiPolygon={aoiPolygon}
-          onPolygonComplete={handlePolygonComplete}
-          onAnimationProgress={handleAnimationProgress}
-          onCurrentGpsTime={handleCurrentGpsTime}
-          onCurrentPosition={handleCurrentPosition}
-          animationProgress={animationProgress}
-          isGroundModeActive={isGroundModeActive}
-          groundCameraPosition={groundCameraPosition}
-          onGroundCameraPositionSet={handleGroundModeClick}
-          groundModeViewData={groundModeViewData}
-        />
-      ) : (
-        <GlobeViewer
-          ref={globeRef}
-          onPolygonComplete={handlePolygonComplete}
-          onAnimationProgress={handleAnimationProgress}
-          onCurrentGpsTime={handleCurrentGpsTime}
-          onCurrentPosition={handleCurrentPosition}
-          initialCameraState={initialCameraState}
-          isGroundModeActive={isGroundModeActive}
-          groundCameraPosition={groundCameraPosition}
-          onGroundCameraPositionSet={handleGroundModeClick}
-        />
-      )}
+      {/* 2D mode only - GlobeViewer removed */}
+      <DeckGLMapView
+        key={mapViewKey}
+        ref={deckMapRef}
+        center={mapCenter}
+        zoom={mapZoom}
+        data={filteredDataForMap}
+        colorMode={colorMode}
+        colormap={colormap}
+        pointSize={pointSize}
+        dataVersion={dataVersion}
+        isDrawingAOI={isDrawingAOI}
+        aoiPolygon={aoiPolygon}
+        onPolygonComplete={handlePolygonComplete}
+        onAnimationProgress={handleAnimationProgress}
+        onCurrentGpsTime={handleCurrentGpsTime}
+        onCurrentPosition={handleCurrentPosition}
+        animationProgress={animationProgress}
+        isGroundModeActive={isGroundModeActive}
+        groundCameraPosition={groundCameraPosition}
+        onGroundCameraPositionSet={handleGroundModeClick}
+        groundModeViewData={groundModeViewData}
+      />
 
       {loading && (
         <div className="loading-overlay">

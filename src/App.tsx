@@ -51,7 +51,7 @@ function App() {
   const [colorMode, setColorMode] = useState<ColorMode>('intensity')
   const [colormap, setColormap] = useState<Colormap>('plasma')
   const [pointSize, setPointSize] = useState(2.0)
-  const [viewMode, setViewMode] = useState<ViewMode>('space')
+  const [viewMode] = useState<ViewMode>('2d') // Fixed to 2D mode only
 
   // Global data range - never changes, represents full unfiltered data
   const [globalDataRange, setGlobalDataRange] = useState<DataRange>({
@@ -154,27 +154,10 @@ function App() {
     setCurrentPosition({ lat, lon })
   }
 
+  // View mode is fixed to 2D - removed toggle functionality
   const handleViewModeChange = (mode: ViewMode) => {
-    // Clear AOI selection when switching between views
-    if (mode !== viewMode) {
-      console.log(`[App] Switching view mode from ${viewMode} to ${mode}, clearing AOI`)
-      handleClearAOI()
-
-      // Set colormap to jet and point size to 10 when switching to 2D mode
-      if (mode === '2d') {
-        console.log(`[App] Switching to 2D mode, setting colormap to jet and point size to 10`)
-        setColormap('jet')
-        setPointSize(10)
-      }
-
-      // Disable ground mode when switching to space view (ground mode only works in 2D)
-      if (mode === 'space' && isGroundModeActive) {
-        console.log(`[App] Switching to space view, disabling ground mode`)
-        setIsGroundModeActive(false)
-        setGroundCameraPosition(null)
-      }
-    }
-    setViewMode(mode)
+    // No-op: View mode is fixed to 2D
+    console.log('[App] View mode is fixed to 2D mode only')
   }
 
   const handleSpatialBoundsFilterChange = (updates: Partial<SpatialBoundsFilter>) => {

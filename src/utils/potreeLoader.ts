@@ -67,7 +67,9 @@ export interface PotreeAttribute {
  * @returns Promise resolving to Potree metadata
  */
 export async function loadPotreeMetadata(baseUrl: string): Promise<PotreeMetadata> {
-  const metadataUrl = baseUrl.endsWith('/') ? `${baseUrl}metadata.json` : `${baseUrl}/metadata.json`
+  // Potree 2.0 standard structure: baseUrl/pointclouds/index/metadata.json
+  const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
+  const metadataUrl = `${normalizedBaseUrl}pointclouds/index/metadata.json`
   console.log(`[PotreeLoader] Loading metadata from: ${metadataUrl}`)
 
   try {
@@ -77,6 +79,25 @@ export async function loadPotreeMetadata(baseUrl: string): Promise<PotreeMetadat
     }
 
     const metadata: PotreeMetadata = await response.json()
+
+    // WORKAROUND: PotreeConverter sometimes generates incorrect top-level boundingBox
+    // Use the position attribute bounds instead (they're always correct)
+    const positionAttr = metadata.attributes.find(attr => attr.name === 'position')
+    if (positionAttr && positionAttr.min && positionAttr.max) {
+      console.warn('[PotreeLoader] Using position attribute bounds instead of top-level boundingBox')
+      console.warn('[PotreeLoader] Original bounds:', metadata.boundingBox)
+      console.warn('[PotreeLoader] Corrected bounds:', {
+        min: positionAttr.min,
+        max: positionAttr.max
+      })
+
+      // Override the incorrect boundingBox with correct position bounds
+      metadata.boundingBox = {
+        min: [positionAttr.min[0], positionAttr.min[1], positionAttr.min[2]],
+        max: [positionAttr.max[0], positionAttr.max[1], positionAttr.max[2]]
+      }
+    }
+
     console.log(`[PotreeLoader] Metadata loaded:`, {
       version: metadata.version,
       points: metadata.points,
@@ -123,8 +144,8 @@ export async function loadPotreeData(
     // Load metadata first
     const metadata = await loadPotreeMetadata(baseUrl)
 
-    // Load octree.bin with all point data
-    const octreeUrl = `${normalizedBaseUrl}octree.bin`
+    // Load octree.bin with all point data (Potree 2.0 structure)
+    const octreeUrl = `${normalizedBaseUrl}pointclouds/index/octree.bin`
     console.log(`[PotreeLoader] Loading octree from: ${octreeUrl}`)
 
     const response = await fetch(octreeUrl)
@@ -170,11 +191,12 @@ function parsePotreePoints(
     }
   }
 ): PointCloudData {
-  console.log(`[PotreeLoader] Parsing ${metadata.points} points from buffer`)
-
   // Calculate point stride (total bytes per point)
   const stride = metadata.attributes.reduce((sum, attr) => sum + attr.size, 0)
-  console.log(`[PotreeLoader] Point stride: ${stride} bytes`)
+
+  // Calculate actual point count from buffer size
+  const maxPoints = Math.floor(buffer.byteLength / stride)
+  console.log(`[PotreeLoader] Parsing ${maxPoints} points from ${buffer.byteLength} byte buffer (stride: ${stride} bytes)`)
 
   // Find attribute offsets
   let offset = 0
@@ -183,9 +205,6 @@ function parsePotreePoints(
     attributeOffsets[attr.name] = offset
     offset += attr.size
   }
-
-  // Allocate output arrays for max possible points
-  const maxPoints = Math.floor(buffer.byteLength / stride)
   const positions = new Float32Array(maxPoints * 3)
   const intensities = new Uint16Array(maxPoints)
   const classifications = new Uint8Array(maxPoints)
@@ -198,6 +217,8 @@ function parsePotreePoints(
   let minX = Infinity, minY = Infinity, minZ = Infinity
   let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
 
+  // Spatial filtering temporarily disabled for debugging
+
   // Parse each point
   for (let i = 0; i < maxPoints; i++) {
     const pointOffset = i * stride
@@ -208,15 +229,25 @@ function parsePotreePoints(
     const y = view.getInt32(posOffset + 4, true) * metadata.scale[1] + metadata.offset[1]
     const z = view.getInt32(posOffset + 8, true) * metadata.scale[2] + metadata.offset[2]
 
-    // Apply spatial filtering if provided
-    if (options?.spatialBounds) {
-      const bounds = options.spatialBounds
-      if (x < bounds.minLon || x > bounds.maxLon ||
-          y < bounds.minLat || y > bounds.maxLat ||
-          z < bounds.minAlt || z > bounds.maxAlt) {
-        continue // Skip this point
-      }
+    // Debug: log first point only
+    if (i === 0) {
+      console.log(`[PotreeLoader] First point: x=${x.toFixed(2)}, y=${y.toFixed(2)}, z=${z.toFixed(2)}`)
     }
+
+    // Apply spatial filtering if provided
+    // TEMPORARILY DISABLED FOR DEBUGGING - TO SEE ALL DATA
+    // if (options?.spatialBounds) {
+    //   const bounds = options.spatialBounds
+    //   if (x < bounds.minLon || x > bounds.maxLon ||
+    //       y < bounds.minLat || y > bounds.maxLat ||
+    //       z < bounds.minAlt || z > bounds.maxAlt) {
+    //     // Debug: log first few filtered points
+    //     if (i < 3) {
+    //       console.log(`[PotreeLoader] Point ${i} FILTERED OUT - outside bounds`)
+    //     }
+    //     continue // Skip this point
+    //   }
+    // }
 
     // Read intensity (uint16)
     const intensityOffset = pointOffset + attributeOffsets['intensity']
@@ -282,7 +313,7 @@ export async function loadPotreeChunk(
   metadata: PotreeMetadata
 ): Promise<PointCloudData> {
   const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
-  const octreeUrl = `${normalizedBaseUrl}octree.bin`
+  const octreeUrl = `${normalizedBaseUrl}pointclouds/index/octree.bin`
 
   console.log(`[PotreeLoader] Loading chunk: offset=${offset}, size=${size}`)
 

@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { Copc } from 'copc'  // Named import, not default!
 import { Colormap } from './colormaps'
 import { computeElevationColors, computeIntensityColors, computeClassificationColors } from './copcLoader'
-import { latLonAltToVector3 } from './coordinateConversion'
+import { latLonAltToVector3, latLonAltToVector3Local } from './coordinateConversion'
 
 /**
  * COPC Octree Node for LOD management
@@ -16,8 +16,10 @@ export interface COPCNode {
   pointCount: number
   bounds: THREE.Box3
   loaded: boolean
+  loading: boolean // Track if node is currently being loaded (prevents duplicate loads)
   points?: THREE.Points
   children?: string[] // Child node keys
+  hierarchyNode?: any // Store the actual COPC hierarchy node for data loading
   pointData?: {
     positions: Float32Array
     colors: Uint8Array
@@ -70,7 +72,7 @@ export class COPCLODManager {
   // Rendering parameters
   private colorMode: 'elevation' | 'intensity' | 'classification' = 'intensity'
   private colormap: Colormap = 'plasma'
-  private pointSize: number = 2.0
+  private pointSize: number = 50.0  // Large size needed for visibility at viewing distance ~2000 units
 
   // Data range for color mapping
   private dataRange = {
@@ -134,6 +136,11 @@ export class COPCLODManager {
       spacing: this.copc.info.spacing
     })
 
+    console.log('[COPCLODManager] 🔍 COORDINATE SCALE AND OFFSET:')
+    console.log('  Scale:  ', this.copc.header.scale)
+    console.log('  Offset: ', this.copc.header.offset)
+    console.log('  ⚠️  If scale values are too large (>0.01), coordinates will be quantized!')
+
     // Load root hierarchy page
     const { nodes, pages } = await Copc.loadHierarchyPage(
       this.getter,
@@ -155,7 +162,9 @@ export class COPCLODManager {
         pointCount: (node as any).pointCount,
         bounds: this.computeNodeBounds(depthStr, xStr, yStr, zStr),
         loaded: false,
-        children: [] // Will be populated when child pages are loaded
+        loading: false,
+        children: [], // Will be populated when child pages are loaded
+        hierarchyNode: node // Store the actual hierarchy node
       }
 
       this.nodes.set(key, copcNode)
@@ -211,7 +220,9 @@ export class COPCLODManager {
           pointCount: (node as any).pointCount,
           bounds: this.computeNodeBounds(depthStr, xStr, yStr, zStr),
           loaded: false,
-          children: []
+          loading: false,
+          children: [],
+          hierarchyNode: node // Store the actual hierarchy node
         }
 
         this.nodes.set(key, copcNode)
@@ -270,7 +281,7 @@ export class COPCLODManager {
     // Traverse octree and determine which nodes to load/unload
     await this.traverseOctree(this.rootNode, camera, frustum)
 
-    console.log(`[COPCLODManager] Current points: ${this.currentPointCount} / ${this.pointBudget}`)
+    // Only log occasionally to avoid spam (removed per-frame logging)
   }
 
   /**
@@ -381,16 +392,20 @@ export class COPCLODManager {
     if (shouldRefine && node.depth < 8) { // Max depth limit
       // Try to load children
       const childKeys = this.getChildKeys(node)
-      const childrenExist = childKeys.every(key => this.nodes.has(key))
 
-      if (childrenExist) {
-        // Try to traverse to children
+      // Check which children exist (COPC hierarchy is lazy-loaded)
+      const availableChildren = childKeys.filter(key => this.nodes.has(key))
+
+      if (availableChildren.length > 0) {
+        // Try to traverse to available children
         let anyChildVisible = false
-        for (const childKey of childKeys) {
+        for (const childKey of availableChildren) {
           const childNode = this.nodes.get(childKey)
           if (childNode) {
             // Check if child would be visible before traversing
-            if (frustum.intersectsBox(childNode.bounds) && this.nodeIntersectsSpatialBounds(childNode)) {
+            // Note: Skip frustum check when ENABLE_FRUSTUM_CULLING is false
+            const inFrustum = ENABLE_FRUSTUM_CULLING ? frustum.intersectsBox(childNode.bounds) : true
+            if (inFrustum && this.nodeIntersectsSpatialBounds(childNode)) {
               anyChildVisible = true
               break
             }
@@ -401,7 +416,7 @@ export class COPCLODManager {
         if (anyChildVisible) {
           const pointCountBeforeChildren = this.currentPointCount
 
-          for (const childKey of childKeys) {
+          for (const childKey of availableChildren) {
             const childNode = this.nodes.get(childKey)
             if (childNode) {
               await this.traverseOctree(childNode, camera, frustum)
@@ -423,8 +438,8 @@ export class COPCLODManager {
       }
     }
 
-    // Load this node if not loaded and within point budget
-    if (!node.loaded && this.currentPointCount + node.pointCount <= this.pointBudget) {
+    // Load this node if not loaded, not currently loading, and within point budget
+    if (!node.loaded && !node.loading && this.currentPointCount + node.pointCount <= this.pointBudget) {
       await this.loadNode(node)
     }
 
@@ -470,7 +485,10 @@ export class COPCLODManager {
    * Load point data for a node
    */
   private async loadNode(node: COPCNode): Promise<void> {
-    if (node.loaded) return
+    if (node.loaded || node.loading) return
+
+    // Mark as loading to prevent duplicate loads
+    node.loading = true
 
     const filteringEnabled = (this.spatialBounds?.enabled || this.heightFilter?.enabled || this.timeRange?.enabled)
 
@@ -481,15 +499,15 @@ export class COPCLODManager {
     }
 
     try {
-      // Get the actual node data from hierarchy
-      const hierarchyNode = await this.getHierarchyNode(node.key)
-      if (!hierarchyNode) {
+      // Use the stored hierarchy node
+      if (!node.hierarchyNode) {
         console.warn(`[COPCLODManager] Node ${node.key} not found in hierarchy`)
+        node.loading = false
         return
       }
 
       // Load point data
-      const view = await Copc.loadPointDataView(this.getter, this.copc, hierarchyNode)
+      const view = await Copc.loadPointDataView(this.getter, this.copc, node.hierarchyNode)
 
       // Extract point data
       const count = node.pointCount
@@ -509,6 +527,11 @@ export class COPCLODManager {
       // Apply scale and offset from header
       const scale = this.copc.header.scale
       const offset = this.copc.header.offset
+
+      // DEBUG: Log scale and offset for EVERY node load to diagnose quantization
+      console.log(`[COPCLODManager] 🔬 SCALE/OFFSET for node ${node.key}:`)
+      console.log(`  Scale:  [${scale[0]}, ${scale[1]}, ${scale[2]}]`)
+      console.log(`  Offset: [${offset[0]}, ${offset[1]}, ${offset[2]}]`)
 
       let validPoints = 0
 
@@ -580,6 +603,8 @@ export class COPCLODManager {
       }
 
       // Convert geographic coordinates (lon, lat, alt) to Cartesian (x, y, z) for THREE.js
+      // Using direct global spherical-to-Cartesian conversion
+      // CALIPSO data spans 342° of longitude - should be clearly visible on 1000-radius globe
       const cartesianPositions = new Float32Array(validPoints * 3)
 
       for (let i = 0; i < validPoints; i++) {
@@ -587,13 +612,87 @@ export class COPCLODManager {
         const lat = finalPositions[i * 3 + 1]
         const alt = finalPositions[i * 3 + 2]
 
-        // Use proven coordinate conversion from coordinateConversion.ts
-        // Includes: spherical coords, 15x altitude exaggeration, correct Z-axis negation
+        // Direct conversion: lat/lon/alt → 3D Cartesian coordinates
+        // Uses 15x altitude exaggeration to make 0-40km vertical extent visible
         const pos = latLonAltToVector3(lat, lon, alt, 15.0)
 
         cartesianPositions[i * 3] = pos.x
         cartesianPositions[i * 3 + 1] = pos.y
         cartesianPositions[i * 3 + 2] = pos.z
+      }
+
+      // Debug: Log Cartesian coordinate ranges (for globally spanning data)
+      if (validPoints > 0) {
+        let minX = cartesianPositions[0], maxX = cartesianPositions[0]
+        let minY = cartesianPositions[1], maxY = cartesianPositions[1]
+        let minZ = cartesianPositions[2], maxZ = cartesianPositions[2]
+
+        for (let i = 0; i < validPoints; i++) {
+          const x = cartesianPositions[i * 3]
+          const y = cartesianPositions[i * 3 + 1]
+          const z = cartesianPositions[i * 3 + 2]
+
+          minX = Math.min(minX, x)
+          maxX = Math.max(maxX, x)
+          minY = Math.min(minY, y)
+          maxY = Math.max(maxY, y)
+          minZ = Math.min(minZ, z)
+          maxZ = Math.max(maxZ, z)
+        }
+
+        console.log(`[COPCLODManager] 🌍 Cartesian coordinates (on 1000-radius globe):`)
+        console.log(`  X: [${minX.toFixed(1)}, ${maxX.toFixed(1)}] (span: ${(maxX - minX).toFixed(1)})`)
+        console.log(`  Y: [${minY.toFixed(1)}, ${maxY.toFixed(1)}] (span: ${(maxY - minY).toFixed(1)})`)
+        console.log(`  Z: [${minZ.toFixed(1)}, ${maxZ.toFixed(1)}] (span: ${(maxZ - minZ).toFixed(1)})`)
+      }
+
+      // Debug: Log coordinate ranges
+      if (validPoints > 0) {
+        // Geographic range
+        const lon0 = finalPositions[0], lat0 = finalPositions[1], alt0 = finalPositions[2]
+        let minLon = lon0, maxLon = lon0, minLat = lat0, maxLat = lat0, minAlt = alt0, maxAlt = alt0
+
+        for (let i = 0; i < validPoints; i++) {
+          const lon = finalPositions[i * 3]
+          const lat = finalPositions[i * 3 + 1]
+          const alt = finalPositions[i * 3 + 2]
+
+          minLon = Math.min(minLon, lon); maxLon = Math.max(maxLon, lon)
+          minLat = Math.min(minLat, lat); maxLat = Math.max(maxLat, lat)
+          minAlt = Math.min(minAlt, alt); maxAlt = Math.max(maxAlt, alt)
+        }
+
+        const lonRange = maxLon - minLon
+        const latRange = maxLat - minLat
+        const altRange = maxAlt - minAlt
+
+        // Cartesian range
+        const x0 = cartesianPositions[0], y0 = cartesianPositions[1], z0 = cartesianPositions[2]
+        let minX = x0, maxX = x0, minY = y0, maxY = y0, minZ = z0, maxZ = z0
+
+        for (let i = 0; i < validPoints; i++) {
+          const x = cartesianPositions[i * 3]
+          const y = cartesianPositions[i * 3 + 1]
+          const z = cartesianPositions[i * 3 + 2]
+
+          minX = Math.min(minX, x); maxX = Math.max(maxX, x)
+          minY = Math.min(minY, y); maxY = Math.max(maxY, y)
+          minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z)
+        }
+
+        const xRange = maxX - minX
+        const yRange = maxY - minY
+        const zRange = maxZ - minZ
+
+        const centerLon = (minLon + maxLon) / 2
+        const centerLat = (minLat + maxLat) / 2
+        const centerAlt = (minAlt + maxAlt) / 2
+
+        console.log(`[COPCLODManager] 📊 Node ${node.key} coordinate ranges:`)
+        console.log(`  Geographic bounds: Lon [${minLon.toFixed(4)}°, ${maxLon.toFixed(4)}°], Lat [${minLat.toFixed(4)}°, ${maxLat.toFixed(4)}°], Alt [${minAlt.toFixed(2)}, ${maxAlt.toFixed(2)}] km`)
+        console.log(`  Geographic spans:  ΔLon=${lonRange.toFixed(6)}°, ΔLat=${latRange.toFixed(6)}°, ΔAlt=${altRange.toFixed(3)}km`)
+        console.log(`  Cartesian spans:   ΔX=${xRange.toFixed(3)}, ΔY=${yRange.toFixed(3)}, ΔZ=${zRange.toFixed(3)}`)
+        console.log(`  Center:            Lon=${centerLon.toFixed(4)}°, Lat=${centerLat.toFixed(4)}°, Alt=${centerAlt.toFixed(2)}km`)
       }
 
       // Compute colors based on current color mode
@@ -655,18 +754,24 @@ export class COPCLODManager {
       geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3, true)) // normalized
 
       const material = new THREE.PointsMaterial({
-        size: this.pointSize * 0.002, // Scale to match globe size
+        size: 5.0, // VERY large size for debugging - should be highly visible!
         vertexColors: true,
-        sizeAttenuation: true,
+        sizeAttenuation: false, // Disable attenuation for consistent size
         transparent: true,
-        opacity: 0.8
+        opacity: 1.0, // Full opacity
+        depthTest: false // Ensure points render on top
       })
 
       const points = new THREE.Points(geometry, material)
       points.frustumCulled = false // We handle culling manually
 
+      // Compute bounding box for debug info
+      geometry.computeBoundingBox()
+      const bbox = geometry.boundingBox!
+
       node.points = points
       node.loaded = true
+      node.loading = false
 
       // Pause rendering before adding to scene (prevents buffer corruption)
       if (this.pauseRendering) {
@@ -682,23 +787,14 @@ export class COPCLODManager {
       }
 
       console.log(`[COPCLODManager] ✨ Node ${node.key} added to scene with ${validPoints.toLocaleString()} points (Cartesian coords)`)
+      console.log(`  Bounding box: X [${bbox.min.x.toFixed(3)}, ${bbox.max.x.toFixed(3)}], Y [${bbox.min.y.toFixed(3)}, ${bbox.max.y.toFixed(3)}], Z [${bbox.min.z.toFixed(3)}, ${bbox.max.z.toFixed(3)}]`)
+      const center = new THREE.Vector3()
+      bbox.getCenter(center)
+      console.log(`  Center: (${center.x.toFixed(3)}, ${center.y.toFixed(3)}, ${center.z.toFixed(3)}), Distance from origin: ${center.length().toFixed(3)}`)
     } catch (error) {
       console.error(`[COPCLODManager] Failed to load node ${node.key}:`, error)
+      node.loading = false
     }
-  }
-
-  /**
-   * Get hierarchy node data for a given key
-   */
-  private async getHierarchyNode(key: string): Promise<any> {
-    // Re-load the hierarchy to get the actual node object
-    // This is needed because copc.js returns node metadata separately
-    const { nodes } = await Copc.loadHierarchyPage(
-      this.getter,
-      this.copc.info.rootHierarchyPage
-    )
-
-    return nodes[key]
   }
 
   /**
@@ -732,6 +828,7 @@ export class COPCLODManager {
     node.points = undefined
     node.pointData = undefined
     node.loaded = false
+    node.loading = false
   }
 
   /**
@@ -808,6 +905,48 @@ export class COPCLODManager {
         const material = node.points.material
         if (material instanceof THREE.PointsMaterial) {
           material.size = size
+        }
+      }
+    }
+  }
+
+  /**
+   * Update all rendering parameters at once
+   * (for compatibility with PointCloudViewer)
+   */
+  updateRenderingParams(
+    colorMode: 'elevation' | 'intensity' | 'classification',
+    colormap: Colormap,
+    pointSize: number,
+    dataRange?: { elevation: [number, number], intensity: [number, number] }
+  ): void {
+    this.colorMode = colorMode
+    this.colormap = colormap
+    this.pointSize = pointSize
+
+    if (dataRange) {
+      this.dataRange = dataRange
+    }
+
+    // Update all loaded nodes
+    for (const node of this.nodes.values()) {
+      if (node.loaded && node.pointData && node.points) {
+        // Recompute colors
+        this.computeColors(
+          node.pointData.positions,
+          node.pointData.intensities,
+          node.pointData.classifications,
+          node.pointData.colors
+        )
+
+        // Update geometry
+        const colorAttribute = node.points.geometry.getAttribute('color') as THREE.BufferAttribute
+        colorAttribute.needsUpdate = true
+
+        // Update point size
+        const material = node.points.material
+        if (material instanceof THREE.PointsMaterial) {
+          material.size = pointSize
         }
       }
     }
@@ -907,6 +1046,22 @@ export class COPCLODManager {
         maxAlt: this.copc.header.max[2]
       },
       time: null // GPS time range not available in header, would need to scan data
+    }
+  }
+
+  /**
+   * Get geographic center of the data bounds
+   */
+  getGeographicCenter(): { lon: number, lat: number, alt: number } | null {
+    const bounds = this.getDataBounds()
+    if (!bounds.spatial) {
+      return null
+    }
+
+    return {
+      lon: (bounds.spatial.minLon + bounds.spatial.maxLon) / 2,
+      lat: (bounds.spatial.minLat + bounds.spatial.maxLat) / 2,
+      alt: (bounds.spatial.minAlt + bounds.spatial.maxAlt) / 2
     }
   }
 

@@ -254,18 +254,17 @@ export function parseCalipsoFilename(filename: string): {
  */
 export function getAvailableFileList(): string[] {
   // CONFIGURE THIS: Update with your actual file paths
-  // Potree directories contain metadata.json, octree.bin, and hierarchy.bin
-  // Each directory represents one converted CALIPSO file
-  const dataDirectory = '/potree_data' // Potree format directories
+  // Using Potree format directories (converted from LAS files)
+  const dataDirectory = '/potree_data_test' // Potree directories location
 
   return [
     `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T16-44-43ZD`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T17-37-28ZN`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T18-23-08ZD`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T19-15-53ZN`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T20-01-33ZD`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T20-54-18ZN`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T21-39-53ZD`,
+    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T17-37-28ZN.copc.laz`,
+    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T18-23-08ZD.copc.laz`,
+    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T19-15-53ZN.copc.laz`,
+    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T20-01-33ZD.copc.laz`,
+    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T20-54-18ZN.copc.laz`,
+    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T21-39-53ZD.copc.laz`,
   ]
 }
 

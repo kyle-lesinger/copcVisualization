@@ -188,6 +188,18 @@ function searchInFileList(
   const results: string[] = []
 
   for (const filepath of fileList) {
+    // For flat structure, we need to check the metadata.json to get the actual filename
+    // For now, we'll use a simple approach: check if this is a direct path to potree_data_test
+    if (filepath.endsWith('potree_data_test') || filepath === '/potree_data_test') {
+      // Flat structure - check metadata to determine if it matches
+      // For now, accept all flat structure directories since we'll validate via metadata
+      console.log(`[FileSearch] ✓ Found flat structure Potree directory: ${filepath}`)
+      console.log(`[FileSearch] ℹ️  Flat structure detected - will validate via metadata.json`)
+      results.push(filepath)
+      continue
+    }
+
+    // Standard directory-based structure
     const dirname = filepath.split('/').pop() || filepath
 
     // Check if directory name matches CALIPSO pattern
@@ -254,17 +266,13 @@ export function parseCalipsoFilename(filename: string): {
  */
 export function getAvailableFileList(): string[] {
   // CONFIGURE THIS: Update with your actual file paths
-  // Using Potree format directories (converted from LAS files)
-  const dataDirectory = '/potree_data_test' // Potree directories location
+  // Using Potree format with FLAT structure (metadata.json in root, not in pointclouds/index/)
+  // The converted Potree data is stored directly in potree_data_test/
+  const dataDirectory = '/potree_data_test' // Potree data location (flat structure)
 
   return [
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T16-44-43ZD`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T17-37-28ZN.copc.laz`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T18-23-08ZD.copc.laz`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T19-15-53ZN.copc.laz`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T20-01-33ZD.copc.laz`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T20-54-18ZN.copc.laz`,
-    `${dataDirectory}/CAL_LID_L1-Standard-V4-51.2023-06-30T21-39-53ZD.copc.laz`,
+    `${dataDirectory}`, // Points directly to the Potree directory (flat structure)
+    // Add more Potree directories here as needed
   ]
 }
 

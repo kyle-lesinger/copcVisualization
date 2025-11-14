@@ -77,38 +77,38 @@ export default function SpatialBoundsPanel({
       return
     }
 
-    if (absoluteBounds) {
-      if (minLonVal < absoluteBounds.minLon || minLonVal > absoluteBounds.maxLon) {
-        setValidationError(`Min Longitude must be between ${absoluteBounds.minLon.toFixed(2)} and ${absoluteBounds.maxLon.toFixed(2)}°`)
-        return
-      }
-
-      if (maxLonVal < absoluteBounds.minLon || maxLonVal > absoluteBounds.maxLon) {
-        setValidationError(`Max Longitude must be between ${absoluteBounds.minLon.toFixed(2)} and ${absoluteBounds.maxLon.toFixed(2)}°`)
-        return
-      }
-
-      if (minLatVal < absoluteBounds.minLat || minLatVal > absoluteBounds.maxLat) {
-        setValidationError(`Min Latitude must be between ${absoluteBounds.minLat.toFixed(2)} and ${absoluteBounds.maxLat.toFixed(2)}°`)
-        return
-      }
-
-      if (maxLatVal < absoluteBounds.minLat || maxLatVal > absoluteBounds.maxLat) {
-        setValidationError(`Max Latitude must be between ${absoluteBounds.minLat.toFixed(2)} and ${absoluteBounds.maxLat.toFixed(2)}°`)
-        return
-      }
-
-      if (minAltVal < absoluteBounds.minAlt || minAltVal > absoluteBounds.maxAlt) {
-        setValidationError(`Min Altitude must be between ${absoluteBounds.minAlt.toFixed(1)} and ${absoluteBounds.maxAlt.toFixed(1)} km`)
-        return
-      }
-
-      if (maxAltVal < absoluteBounds.minAlt || maxAltVal > absoluteBounds.maxAlt) {
-        setValidationError(`Max Altitude must be between ${absoluteBounds.minAlt.toFixed(1)} and ${absoluteBounds.maxAlt.toFixed(1)} km`)
-        return
-      }
+    // Validate geographic limits (not data bounds - user can filter anywhere!)
+    if (minLonVal < -180 || minLonVal > 180) {
+      setValidationError('Min Longitude must be between -180° and 180°')
+      return
     }
 
+    if (maxLonVal < -180 || maxLonVal > 180) {
+      setValidationError('Max Longitude must be between -180° and 180°')
+      return
+    }
+
+    if (minLatVal < -90 || minLatVal > 90) {
+      setValidationError('Min Latitude must be between -90° and 90°')
+      return
+    }
+
+    if (maxLatVal < -90 || maxLatVal > 90) {
+      setValidationError('Max Latitude must be between -90° and 90°')
+      return
+    }
+
+    if (minAltVal < 0 || minAltVal > 100) {
+      setValidationError('Min Altitude must be between 0 and 100 km')
+      return
+    }
+
+    if (maxAltVal < 0 || maxAltVal > 100) {
+      setValidationError('Max Altitude must be between 0 and 100 km')
+      return
+    }
+
+    // Validate min <= max
     if (minLonVal > maxLonVal) {
       setValidationError('Min Longitude must be less than or equal to Max Longitude')
       return

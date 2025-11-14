@@ -347,8 +347,9 @@ function App() {
     console.log(`  • Alt: ${spatialBoundsFilter.minAlt.toFixed(2)} to ${spatialBoundsFilter.maxAlt.toFixed(2)} km`)
     console.log(`[App] 📂 Loading ${foundFiles.files.length} file(s)`)
 
-    // Set the files to be loaded (this will trigger PointCloudViewer to load them)
-    setSelectedFiles(foundFiles.files)
+    // Create a new array reference to force React to recognize the change
+    // This ensures PointCloudViewer reloads even if the file list is the same
+    setSelectedFiles([...foundFiles.files])
 
   }, [spatialFilterApplyCounter, spatialBoundsFilter.enabled, foundFiles, selectedFiles.length, spatialBoundsFilter.minLon, spatialBoundsFilter.maxLon, spatialBoundsFilter.minLat, spatialBoundsFilter.maxLat, spatialBoundsFilter.minAlt, spatialBoundsFilter.maxAlt])
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Batch convert all CALIPSO HDF files to COPC format
+# Batch convert all CALIPSO HDF files to COPC and Potree formats
 #
 # Usage: ./convert_all.sh
 #
@@ -11,17 +11,29 @@ set -e  # Exit on error
 source /opt/anaconda3/etc/profile.d/conda.sh
 conda activate pdal
 
-# Create output directory
+# Create output directories
 mkdir -p output
+mkdir -p potree_data
 
 # Get script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 DATA_DIR="$SCRIPT_DIR/data"
 OUTPUT_DIR="$SCRIPT_DIR/output"
+POTREE_DIR="$SCRIPT_DIR/potree_data"
+POTREE_CONVERTER="$SCRIPT_DIR/PotreeConverter/build/PotreeConverter"
 
 echo "========================================="
-echo "CALIPSO to COPC Conversion Pipeline"
+echo "CALIPSO to COPC and Potree Pipeline"
 echo "========================================="
+echo ""
+
+# Check if PotreeConverter exists
+if [ -f "$POTREE_CONVERTER" ]; then
+    echo "✓ PotreeConverter found at: $POTREE_CONVERTER"
+else
+    echo "⚠ PotreeConverter not found at: $POTREE_CONVERTER"
+    echo "  Potree conversion will be skipped (COPC files will still be created)"
+fi
 echo ""
 
 # Count HDF files
@@ -45,7 +57,7 @@ for hdf_file in "$DATA_DIR"/*.hdf; do
 
     # Step 1: Convert HDF to LAS
     las_file="$OUTPUT_DIR/${base_name}.las"
-    echo "Step 1/2: Converting HDF to LAS..."
+    echo "Step 1/3: Converting HDF to LAS..."
     python3 "$SCRIPT_DIR/calipso_to_las.py" "$hdf_file" "$las_file"
 
     # Check if LAS was created successfully
@@ -56,7 +68,7 @@ for hdf_file in "$DATA_DIR"/*.hdf; do
 
     # Step 2: Convert LAS to COPC using PDAL
     copc_file="$OUTPUT_DIR/${base_name}.copc.laz"
-    echo "Step 2/2: Converting LAS to COPC..."
+    echo "Step 2/3: Converting LAS to COPC..."
     pdal pipeline "$SCRIPT_DIR/las_to_copc.json" \
         --readers.las.filename="$las_file" \
         --writers.copc.filename="$copc_file"
@@ -64,6 +76,23 @@ for hdf_file in "$DATA_DIR"/*.hdf; do
     # Check if COPC was created successfully
     if [ -f "$copc_file" ]; then
         echo "SUCCESS: Created $copc_file"
+
+        # Step 3: Convert COPC to Potree format (optional - will skip if PotreeConverter not installed)
+        potree_output="$POTREE_DIR/${base_name}"
+        echo "Step 3/3: Converting COPC to Potree format..."
+        if python3 "$SCRIPT_DIR/convert_to_potree.py" "$hdf_file" \
+            -o "$POTREE_DIR" \
+            --potree-path "$POTREE_CONVERTER" \
+            --keep-intermediate 2>&1; then
+            if [ -d "$potree_output" ]; then
+                echo "SUCCESS: Created Potree format in $potree_output"
+            else
+                echo "WARNING: Potree conversion completed but directory not found"
+            fi
+        else
+            echo "WARNING: Potree conversion skipped (PotreeConverter may not be installed)"
+            echo "         COPC files are still available in $OUTPUT_DIR"
+        fi
 
         # Optionally remove intermediate LAS file to save space
         # Uncomment the following line to delete LAS files after COPC conversion
@@ -80,12 +109,18 @@ echo "========================================="
 echo "Conversion Complete!"
 echo "========================================="
 echo ""
-echo "Output files location: $OUTPUT_DIR"
+echo "Output files locations:"
+echo "  COPC files: $OUTPUT_DIR"
+echo "  Potree files: $POTREE_DIR"
 echo ""
 
 # List output files with sizes
 echo "Generated COPC files:"
 ls -lh "$OUTPUT_DIR"/*.copc.laz 2>/dev/null || echo "No COPC files generated"
+echo ""
+
+echo "Generated Potree directories:"
+ls -d "$POTREE_DIR"/*/ 2>/dev/null || echo "No Potree directories generated"
 echo ""
 
 # Optional: Display file info using PDAL

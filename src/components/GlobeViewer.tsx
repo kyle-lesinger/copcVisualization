@@ -72,7 +72,7 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
   }
 
   // Helper to convert lat/lon to 3D point
-  const latLonToPoint3D = (latLon: LatLon, radius: number = 1.0): THREE.Vector3 => {
+  const latLonToPoint3D = (latLon: LatLon, radius: number = 1000.0): THREE.Vector3 => {
     const latRad = (latLon.lat * Math.PI) / 180
     const lonRad = (latLon.lon * Math.PI) / 180
 
@@ -180,10 +180,10 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
     clearGroundMarker()
 
     const markerGroup = new THREE.Group()
-    const position = latLonToPoint3D({ lat, lon }, 1.01) // Slightly above globe surface
+    const position = latLonToPoint3D({ lat, lon }, 1010.0) // Slightly above globe surface (scaled for 1000x Earth radius)
 
-    // Create a cone marker pointing up
-    const coneGeometry = new THREE.ConeGeometry(0.02, 0.05, 8)
+    // Create a cone marker pointing up (scaled for 1000x Earth radius)
+    const coneGeometry = new THREE.ConeGeometry(20, 50, 8)
     const coneMaterial = new THREE.MeshBasicMaterial({
       color: 0xff0000,
       transparent: true,
@@ -200,8 +200,8 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
 
     markerGroup.add(cone)
 
-    // Add a small sphere at the base
-    const sphereGeometry = new THREE.SphereGeometry(0.015, 16, 16)
+    // Add a small sphere at the base (scaled for 1000x Earth radius)
+    const sphereGeometry = new THREE.SphereGeometry(15, 16, 16)
     const sphereMaterial = new THREE.MeshBasicMaterial({
       color: 0xff0000,
       transparent: true,
@@ -314,7 +314,7 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       // Reset animation progress to 0 (hides all points)
       onAnimationProgress?.(0)
 
-      const orbitalRadius = 1.45
+      const orbitalRadius = 1450.0 // Scaled for 1000x Earth radius
 
       // Move satellite to start position immediately
       const startSatellitePos = latLonToPoint3D({ lat: firstPoint.lat, lon: firstPoint.lon }, orbitalRadius)
@@ -363,7 +363,7 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
           satelliteRef.current.position.copy(currentSatellitePos)
 
           // Calculate current ground position
-          const currentGroundPos = latLonToPoint3D({ lat: currentLat, lon: currentLon }, 1.0)
+          const currentGroundPos = latLonToPoint3D({ lat: currentLat, lon: currentLon }, 1000.0)
 
           // Update laser beam from satellite to ground
           createLaserBeam(currentSatellitePos, currentGroundPos)
@@ -402,30 +402,31 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       const target = controls.target.clone().normalize()
       const targetLatLon = point3DToLatLon(target)
 
+      // ==================== GET CAMERA STATE LOGGING - COMMENTED OUT ====================
       // Throttle logging to once every 5 seconds
-      const now = Date.now()
-      if (now - lastCameraLogTimeRef.current >= 5000) {
-        lastCameraLogTimeRef.current = now
+      // const now = Date.now()
+      // if (now - lastCameraLogTimeRef.current >= 5000) {
+      //   lastCameraLogTimeRef.current = now
 
-        // Convert camera position to spherical coordinates for clarity
-        const camLatRad = Math.asin(camera.position.y / distance)
-        const camLonRad = Math.atan2(-camera.position.z, camera.position.x)
-        const camLatDeg = camLatRad * (180 / Math.PI)
-        const camLonDeg = camLonRad * (180 / Math.PI)
+      //   // Convert camera position to spherical coordinates for clarity
+      //   const camLatRad = Math.asin(camera.position.y / distance)
+      //   const camLonRad = Math.atan2(-camera.position.z, camera.position.x)
+      //   const camLatDeg = camLatRad * (180 / Math.PI)
+      //   const camLonDeg = camLonRad * (180 / Math.PI)
 
-        console.log('📸 GET Camera State:')
-        console.log('   Camera Position (Cartesian):')
-        console.log(`      x: ${camera.position.x.toFixed(4)} (East/West)`)
-        console.log(`      y: ${camera.position.y.toFixed(4)} (Up/Down)`)
-        console.log(`      z: ${camera.position.z.toFixed(4)} (North/South)`)
-        console.log('   Camera Position (Geographic):')
-        console.log(`      Latitude:  ${camLatDeg.toFixed(4)}°`)
-        console.log(`      Longitude: ${camLonDeg.toFixed(4)}°`)
-        console.log(`      Distance:  ${distance.toFixed(4)}`)
-        console.log('   Target:')
-        console.log(`      Cartesian: (${controls.target.x.toFixed(4)}, ${controls.target.y.toFixed(4)}, ${controls.target.z.toFixed(4)})`)
-        console.log(`      Lat/Lon: (${targetLatLon.lat.toFixed(4)}°, ${targetLatLon.lon.toFixed(4)}°)`)
-      }
+      //   console.log('📸 GET Camera State:')
+      //   console.log('   Camera Position (Cartesian):')
+      //   console.log(`      x: ${camera.position.x.toFixed(4)} (East/West)`)
+      //   console.log(`      y: ${camera.position.y.toFixed(4)} (Up/Down)`)
+      //   console.log(`      z: ${camera.position.z.toFixed(4)} (North/South)`)
+      //   console.log('   Camera Position (Geographic):')
+      //   console.log(`      Latitude:  ${camLatDeg.toFixed(4)}°`)
+      //   console.log(`      Longitude: ${camLonDeg.toFixed(4)}°`)
+      //   console.log(`      Distance:  ${distance.toFixed(4)}`)
+      //   console.log('   Target:')
+      //   console.log(`      Cartesian: (${controls.target.x.toFixed(4)}, ${controls.target.y.toFixed(4)}, ${controls.target.z.toFixed(4)})`)
+      //   console.log(`      Lat/Lon: (${targetLatLon.lat.toFixed(4)}°, ${targetLatLon.lon.toFixed(4)}°)`)
+      // }
 
       return {
         distance,
@@ -438,14 +439,15 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       const camera = cameraRef.current
       const controls = controlsRef.current
 
-      console.log('==================== CAMERA STATE UPDATE ====================')
-      console.log('📍 Input Parameters:')
-      console.log(`   Distance: ${distance.toFixed(4)}`)
-      console.log(`   Target Lat/Lon: (${target.lat.toFixed(4)}°, ${target.lon.toFixed(4)}°)`)
+      // ==================== CAMERA STATE UPDATE - COMMENTED OUT ====================
+      // console.log('==================== CAMERA STATE UPDATE ====================')
+      // console.log('📍 Input Parameters:')
+      // console.log(`   Distance: ${distance.toFixed(4)}`)
+      // console.log(`   Target Lat/Lon: (${target.lat.toFixed(4)}°, ${target.lon.toFixed(4)}°)`)
 
       // Convert target lat/lon to 3D point
-      const targetPoint = latLonToPoint3D(target, 1.0)
-      console.log(`   Target 3D Point: (${targetPoint.x.toFixed(4)}, ${targetPoint.y.toFixed(4)}, ${targetPoint.z.toFixed(4)})`)
+      const targetPoint = latLonToPoint3D(target, 1000.0)
+      // console.log(`   Target 3D Point: (${targetPoint.x.toFixed(4)}, ${targetPoint.y.toFixed(4)}, ${targetPoint.z.toFixed(4)})`)
       controls.target.copy(targetPoint)
 
       // Position camera using spherical coordinates relative to target
@@ -457,10 +459,10 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       const elevationRad = elevationDegrees * (Math.PI / 180)
       const azimuthRad = azimuthDegrees * (Math.PI / 180)
 
-      console.log('📐 Camera Positioning (Spherical Coordinates):')
-      console.log(`   Elevation: ${elevationDegrees}° (angle above horizon)`)
-      console.log(`   Azimuth:   ${azimuthDegrees}° (rotation around target, 0°=North)`)
-      console.log(`   Distance:  ${distance.toFixed(4)}`)
+      // console.log('📐 Camera Positioning (Spherical Coordinates):')
+      // console.log(`   Elevation: ${elevationDegrees}° (angle above horizon)`)
+      // console.log(`   Azimuth:   ${azimuthDegrees}° (rotation around target, 0°=North)`)
+      // console.log(`   Distance:  ${distance.toFixed(4)}`)
 
       // Convert target to 3D point (already done above, but for clarity)
       const targetPos = targetPoint
@@ -490,10 +492,10 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       const offsetEast = horizontalDist * Math.sin(azimuthRad)
       const offsetUp = verticalDist
 
-      console.log('   Offset from target (local frame):')
-      console.log(`      North: ${offsetNorth.toFixed(4)}`)
-      console.log(`      East:  ${offsetEast.toFixed(4)}`)
-      console.log(`      Up:    ${offsetUp.toFixed(4)}`)
+      // console.log('   Offset from target (local frame):')
+      // console.log(`      North: ${offsetNorth.toFixed(4)}`)
+      // console.log(`      East:  ${offsetEast.toFixed(4)}`)
+      // console.log(`      Up:    ${offsetUp.toFixed(4)}`)
 
       // Convert to world coordinates
       const cameraOffset = new THREE.Vector3()
@@ -503,10 +505,10 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
 
       const cameraPosition = targetPos.clone().add(cameraOffset)
 
-      console.log('📷 Final Camera Position (Cartesian):')
-      console.log(`   x: ${cameraPosition.x.toFixed(4)} (East/West component)`)
-      console.log(`   y: ${cameraPosition.y.toFixed(4)} (Up/Down component - elevation)`)
-      console.log(`   z: ${cameraPosition.z.toFixed(4)} (North/South component)`)
+      // console.log('📷 Final Camera Position (Cartesian):')
+      // console.log(`   x: ${cameraPosition.x.toFixed(4)} (East/West component)`)
+      // console.log(`   y: ${cameraPosition.y.toFixed(4)} (Up/Down component - elevation)`)
+      // console.log(`   z: ${cameraPosition.z.toFixed(4)} (North/South component)`)
 
       camera.position.copy(cameraPosition)
 
@@ -524,19 +526,19 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       const viewDown = Math.asin(-viewDirection.y) * (180 / Math.PI) // Angle looking down from horizontal
 
       // Log final state after update
-      console.log('✅ Controls Updated:')
-      console.log(`   Controls target (Cartesian): (${controls.target.x.toFixed(4)}, ${controls.target.y.toFixed(4)}, ${controls.target.z.toFixed(4)})`)
-      console.log(`   Camera position (Cartesian): (${camera.position.x.toFixed(4)}, ${camera.position.y.toFixed(4)}, ${camera.position.z.toFixed(4)})`)
-      console.log('')
-      console.log('📍 Camera Position (Geographic):')
-      console.log(`   Camera Latitude:  ${camLatDeg.toFixed(4)}°`)
-      console.log(`   Camera Longitude: ${camLonDeg.toFixed(4)}°`)
-      console.log(`   Camera Distance:  ${camDist.toFixed(4)}`)
-      console.log('')
-      console.log('👁️  Viewing Direction:')
-      console.log(`   Looking ${viewDown >= 0 ? 'down' : 'up'} at ${Math.abs(viewDown).toFixed(2)}° from horizontal`)
-      console.log(`   View vector: (${viewDirection.x.toFixed(4)}, ${viewDirection.y.toFixed(4)}, ${viewDirection.z.toFixed(4)})`)
-      console.log('============================================================')
+      // console.log('✅ Controls Updated:')
+      // console.log(`   Controls target (Cartesian): (${controls.target.x.toFixed(4)}, ${controls.target.y.toFixed(4)}, ${controls.target.z.toFixed(4)})`)
+      // console.log(`   Camera position (Cartesian): (${camera.position.x.toFixed(4)}, ${camera.position.y.toFixed(4)}, ${camera.position.z.toFixed(4)})`)
+      // console.log('')
+      // console.log('📍 Camera Position (Geographic):')
+      // console.log(`   Camera Latitude:  ${camLatDeg.toFixed(4)}°`)
+      // console.log(`   Camera Longitude: ${camLonDeg.toFixed(4)}°`)
+      // console.log(`   Camera Distance:  ${camDist.toFixed(4)}`)
+      // console.log('')
+      // console.log('👁️  Viewing Direction:')
+      // console.log(`   Looking ${viewDown >= 0 ? 'down' : 'up'} at ${Math.abs(viewDown).toFixed(2)}° from horizontal`)
+      // console.log(`   View vector: (${viewDirection.x.toFixed(4)}, ${viewDirection.y.toFixed(4)}, ${viewDirection.z.toFixed(4)})`)
+      // console.log('============================================================')
     },
     pauseRendering: () => {
       renderEnabledRef.current = false
@@ -566,10 +568,11 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
     sceneRef.current = scene
 
     // Create camera with closer near plane for sea-level viewing
-    const camera = new THREE.PerspectiveCamera(45, width / height, 0.001, 10000)
+    // Far plane increased to 10000000 to accommodate 1000x scaled scene
+    const camera = new THREE.PerspectiveCamera(45, width / height, 0.001, 10000000)
 
     console.log('🎬 ==================== INITIAL CAMERA SETUP ====================')
-    console.log(`   FOV: 45°, Aspect: ${(width / height).toFixed(4)}, Near: 0.001, Far: 10000`)
+    console.log(`   FOV: 45°, Aspect: ${(width / height).toFixed(4)}, Near: 0.001, Far: 10000000`)
 
     // Set initial camera position from prop or use default
     if (initialCameraState) {
@@ -577,7 +580,7 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       console.log(`   Distance: ${initialCameraState.distance.toFixed(4)}`)
       console.log(`   Target Lat/Lon: (${initialCameraState.target.lat.toFixed(4)}°, ${initialCameraState.target.lon.toFixed(4)}°)`)
 
-      const targetPoint = latLonToPoint3D(initialCameraState.target, 1.0)
+      const targetPoint = latLonToPoint3D(initialCameraState.target, 1000.0)
       console.log(`   Target 3D Point: (${targetPoint.x.toFixed(4)}, ${targetPoint.y.toFixed(4)}, ${targetPoint.z.toFixed(4)})`)
 
       const direction = targetPoint.clone().normalize()
@@ -601,10 +604,11 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       console.log(`      Longitude: ${camLon.toFixed(4)}°`)
       console.log(`      Distance:  ${dist.toFixed(4)}`)
     } else {
-      camera.position.set(0, 0, 3)
+      // Default camera position scaled to match 1000x Earth radius
+      camera.position.set(0, 0, 3000)
       console.log('📍 Using default camera position:')
-      console.log('   Cartesian: (0, 0, 3)')
-      console.log('   This is straight out along the Z-axis at distance 3')
+      console.log('   Cartesian: (0, 0, 3000)')
+      console.log('   This is straight out along the Z-axis at distance 3000')
       console.log(`   Distance from origin: ${camera.position.length().toFixed(4)}`)
     }
 
@@ -629,8 +633,8 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
     scene.add(sunLight)
 
     // Create Earth globe
-    // Earth radius: using 1.0 as base unit (actual radius ~6371 km)
-    const earthRadius = 1.0
+    // Earth radius: using 1000.0 as base unit (scaled for Float32 precision)
+    const earthRadius = 1000.0
     const globeGeometry = new THREE.SphereGeometry(earthRadius, 64, 64)
 
     // Load Earth texture map (NASA Blue Marble)
@@ -777,15 +781,15 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
     controls.dampingFactor = 0.05
-    controls.minDistance = 0.01 // Allow zooming very close to see curtain details
-    controls.maxDistance = 10
+    controls.minDistance = 10 // Allow zooming very close to see curtain details (scaled for 1000x Earth radius)
+    controls.maxDistance = 10000 // Scaled for 1000x Earth radius
     controls.autoRotate = false
     controls.autoRotateSpeed = 0.5
 
     // Set initial controls target if provided
     if (initialCameraState) {
       console.log('🎯 ==================== INITIAL CONTROLS TARGET ====================')
-      const targetPoint = latLonToPoint3D(initialCameraState.target, 1.0)
+      const targetPoint = latLonToPoint3D(initialCameraState.target, 1000.0)
       console.log('   Target (Geographic):')
       console.log(`      Latitude:  ${initialCameraState.target.lat.toFixed(4)}°`)
       console.log(`      Longitude: ${initialCameraState.target.lon.toFixed(4)}°`)
@@ -1008,8 +1012,8 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
       completedPolygon.forEach((vertex, index) => {
         const position = latLonToPoint3D(vertex, radius)
 
-        // Yellow sphere marker
-        const sphereGeometry = new THREE.SphereGeometry(0.01, 16, 16)
+        // Yellow sphere marker (scaled for 1000x Earth radius)
+        const sphereGeometry = new THREE.SphereGeometry(10, 16, 16)
         const sphereMaterial = new THREE.MeshBasicMaterial({ color: 0xffff00 })
         const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial)
         sphere.position.copy(position)
@@ -1059,7 +1063,7 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
         // Different color for first vertex (green) vs others (red)
         const color = index === 0 ? 0x00ff00 : 0xff0000
         const bgColor = index === 0 ? '#00ff00' : '#ff0000'
-        const sphereGeometry = new THREE.SphereGeometry(0.01, 16, 16)
+        const sphereGeometry = new THREE.SphereGeometry(10, 16, 16) // Scaled for 1000x Earth radius
         const sphereMaterial = new THREE.MeshBasicMaterial({ color })
         const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial)
         sphere.position.copy(position)
@@ -1103,7 +1107,7 @@ const GlobeViewer = forwardRef<GlobeViewerHandle, GlobeViewerProps>((props, ref)
         // Position satellite in Low Earth Orbit (LEO)
         // Landsat orbits at ~700km altitude, Earth radius is 1.0 in our units
         // So orbital radius should be approximately 1.11 (1 + 700/6371)
-        const orbitalRadius = 1.45
+        const orbitalRadius = 1450.0 // Scaled for 1000x Earth radius
         satellite.position.set(orbitalRadius, 0, 0)
 
         // Add to scene

@@ -1,0 +1,166 @@
+.spatial-bounds-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.spatial-bounds-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.spatial-bounds-header h4 {
+  margin: 0;
+}
+
+.spatial-bounds-toggle {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+.spatial-bounds-toggle input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.spatial-bounds-toggle .toggle-label {
+  padding: 4px 12px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.7);
+  transition: all 0.2s;
+  min-width: 40px;
+  text-align: center;
+}
+
+.spatial-bounds-toggle input[type="checkbox"]:checked + .toggle-label {
+  background: #4a9eff;
+  border-color: #4a9eff;
+  color: white;
+}
+
+.spatial-bounds-controls {
+  transition: opacity 0.2s;
+}
+
+.spatial-bounds-controls.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.spatial-input-section {
+  margin-bottom: 16px;
+}
+
+.spatial-input-section .section-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.8);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.spatial-input-row {
+  display: flex;
+  gap: 12px;
+}
+
+.spatial-input-group {
+  flex: 1;
+}
+
+.spatial-input-group .control-label {
+  display: block;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.6);
+  margin-bottom: 4px;
+}
+
+.spatial-input {
+  width: 100%;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  color: white;
+  font-size: 13px;
+  font-family: inherit;
+  transition: all 0.2s;
+}
+
+.spatial-input:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.spatial-input:focus {
+  outline: none;
+  border-color: #4a9eff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.spatial-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* Remove spinner arrows from number input */
+.spatial-input::-webkit-outer-spin-button,
+.spatial-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.spatial-input[type=number] {
+  -moz-appearance: textfield;
+}
+
+.validation-error {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  background: rgba(255, 82, 82, 0.1);
+  border: 1px solid rgba(255, 82, 82, 0.4);
+  border-radius: 4px;
+  color: #ff9999;
+  font-size: 12px;
+}
+
+.spatial-bounds-summary {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: rgba(74, 158, 255, 0.1);
+  border: 1px solid rgba(74, 158, 255, 0.3);
+  border-radius: 4px;
+}
+
+.spatial-bounds-summary .range-text {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.9);
+  line-height: 1.6;
+}
+
+.spatial-bounds-summary .range-text strong {
+  font-weight: 600;
+  color: white;
+}
+
+.spatial-bounds-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.spatial-bounds-buttons .control-button {
+  flex: 1;
+  margin-right: 0;
+  margin-bottom: 0;
+}

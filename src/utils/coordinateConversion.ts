@@ -3,8 +3,11 @@
  * (latitude, longitude, altitude) to 3D Cartesian coordinates on a globe.
  */
 
-// Earth radius in scene units (normalized to 1.0)
-const EARTH_RADIUS = 1.0
+// Earth radius in scene units (scaled up for Float32 precision)
+// Using 1000 instead of 1.0 to preserve precision for narrow satellite tracks
+// At radius 1.0, variations of 0.00006 are lost in Float32 precision
+// At radius 1000, variations of 60 are easily representable
+const EARTH_RADIUS = 1000.0
 
 // Actual Earth radius in kilometers
 const EARTH_RADIUS_KM = 6371.0
@@ -75,6 +78,78 @@ export function convertPointsToGlobe(
  */
 export function getEarthRadius(): number {
   return EARTH_RADIUS
+}
+
+/**
+ * Convert latitude, longitude, and altitude to 3D Cartesian coordinates on a globe
+ * using a local tangent plane approximation centered at the data centroid.
+ * This preserves precision for narrow satellite tracks by working in a local coordinate system.
+ *
+ * @param lat Latitude in degrees
+ * @param lon Longitude in degrees
+ * @param alt Altitude in kilometers
+ * @param centerLat Centroid latitude in degrees
+ * @param centerLon Centroid longitude in degrees
+ * @param centerAlt Centroid altitude in kilometers
+ * @param altitudeExaggeration Altitude exaggeration factor (default: 15)
+ * @returns Object with x, y, z coordinates in local tangent plane
+ */
+export function latLonAltToVector3Local(
+  lat: number,
+  lon: number,
+  alt: number,
+  centerLat: number,
+  centerLon: number,
+  centerAlt: number,
+  altitudeExaggeration: number = 15.0
+): { x: number; y: number; z: number } {
+  // Convert center to spherical coordinates
+  const centerPhi = (90 - centerLat) * (Math.PI / 180)
+  const centerTheta = centerLon * (Math.PI / 180)
+  const centerRadius = EARTH_RADIUS + (centerAlt / EARTH_RADIUS_KM) * altitudeExaggeration
+
+  // Calculate local East-North-Up basis vectors at center point
+  // East vector (tangent to longitude)
+  const eastX = -Math.sin(centerTheta)
+  const eastY = 0
+  const eastZ = Math.cos(centerTheta)
+
+  // North vector (tangent to latitude)
+  const northX = -Math.cos(centerPhi) * Math.cos(centerTheta)
+  const northY = Math.sin(centerPhi)
+  const northZ = -Math.cos(centerPhi) * Math.sin(centerTheta)
+
+  // Up vector (radial)
+  const upX = Math.sin(centerPhi) * Math.cos(centerTheta)
+  const upY = Math.cos(centerPhi)
+  const upZ = -Math.sin(centerPhi) * Math.sin(centerTheta)
+
+  // Calculate offsets in meters from center
+  const latDiff = lat - centerLat
+  const lonDiff = lon - centerLon
+  const altDiff = alt - centerAlt
+
+  // Convert degree differences to meters
+  const metersPerDegreeLat = 111320.0 // meters per degree latitude (approximately constant)
+  const metersPerDegreeLon = 111320.0 * Math.cos(centerLat * Math.PI / 180) // varies with latitude
+
+  const northMeters = latDiff * metersPerDegreeLat
+  const eastMeters = lonDiff * metersPerDegreeLon
+  const upMeters = altDiff * 1000.0 // km to meters
+
+  // Scale to scene units (EARTH_RADIUS = 1.0 represents ~6371 km)
+  const scale = EARTH_RADIUS / (EARTH_RADIUS_KM * 1000.0) // scene units per meter
+
+  const northScene = northMeters * scale
+  const eastScene = eastMeters * scale
+  const upScene = upMeters * scale * altitudeExaggeration
+
+  // Combine using local basis vectors
+  const x = centerRadius * upX + eastScene * eastX + northScene * northX + upScene * upX
+  const y = centerRadius * upY + eastScene * eastY + northScene * northY + upScene * upY
+  const z = centerRadius * upZ + eastScene * eastZ + northScene * northZ + upScene * upZ
+
+  return { x, y, z }
 }
 
 /**

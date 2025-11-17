@@ -1,0 +1,150 @@
+.date-range-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.date-range-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.date-range-header h4 {
+  margin: 0;
+}
+
+.date-range-toggle {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+.date-range-toggle input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.date-range-toggle .toggle-label {
+  padding: 4px 12px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.7);
+  transition: all 0.2s;
+  min-width: 40px;
+  text-align: center;
+}
+
+.date-range-toggle input[type="checkbox"]:checked + .toggle-label {
+  background: #4a9eff;
+  border-color: #4a9eff;
+  color: white;
+}
+
+.date-range-controls {
+  transition: opacity 0.2s;
+}
+
+.date-range-controls.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.date-input-row {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.date-input-group {
+  width: 100%;
+}
+
+.date-input-group .control-label {
+  display: block;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.8);
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
+.date-input {
+  width: 100%;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  color: white;
+  font-size: 13px;
+  font-family: inherit;
+  transition: all 0.2s;
+}
+
+.date-input:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.date-input:focus {
+  outline: none;
+  border-color: #4a9eff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.date-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* Date picker calendar icon styling */
+.date-input::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+  cursor: pointer;
+}
+
+.validation-error {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  background: rgba(255, 82, 82, 0.1);
+  border: 1px solid rgba(255, 82, 82, 0.4);
+  border-radius: 4px;
+  color: #ff9999;
+  font-size: 12px;
+}
+
+.date-range-summary {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: rgba(74, 158, 255, 0.1);
+  border: 1px solid rgba(74, 158, 255, 0.3);
+  border-radius: 4px;
+}
+
+.date-range-summary .range-text {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.9);
+  line-height: 1.6;
+}
+
+.date-range-summary .range-text strong {
+  font-weight: 600;
+  color: white;
+}
+
+.date-range-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.date-range-buttons .control-button {
+  flex: 1;
+  margin-right: 0;
+  margin-bottom: 0;
+}

@@ -1,7 +1,6 @@
-import { ColorMode, Colormap, DataRange, ViewMode, HeightFilter } from '../App'
+import { ColorMode, Colormap, DataRange, ViewMode } from '../App'
 import { getColormapName } from '../utils/colormaps'
 import { formatTaiTime } from '../utils/copcLoader'
-import HeightFilterPanel from './HeightFilterPanel'
 import ColorBar from './ColorBar'
 import './ControlPanel.css'
 
@@ -15,11 +14,6 @@ interface ControlPanelProps {
   viewMode: ViewMode
   onViewModeChange: (mode: ViewMode) => void
   dataRange: DataRange
-  globalDataRange: DataRange
-  // Height filter controls
-  heightFilter: HeightFilter
-  onHeightFilterChange: (updates: Partial<HeightFilter>) => void
-  onResetHeightFilter: () => void
   // AOI controls
   isDrawingAOI: boolean
   onToggleDrawAOI: () => void
@@ -50,10 +44,6 @@ export default function ControlPanel({
   viewMode,
   onViewModeChange,
   dataRange,
-  globalDataRange,
-  heightFilter,
-  onHeightFilterChange,
-  onResetHeightFilter,
   isDrawingAOI,
   onToggleDrawAOI,
   onClearAOI,
@@ -105,18 +95,13 @@ export default function ControlPanel({
 
           {/* ColorBar showing the current data range */}
           {(() => {
-            // Determine which data range to display based on color mode and height filter
+            // Determine which data range to display based on color mode
             let minValue = 0
             let maxValue = 1
             let label = ''
 
             if (colorMode === 'elevation') {
-              // For elevation, use height filter if enabled, otherwise use data range
-              if (heightFilter.enabled) {
-                minValue = heightFilter.min
-                maxValue = heightFilter.max
-                label = 'Altitude (km, filtered)'
-              } else if (dataRange.elevation) {
+              if (dataRange.elevation) {
                 minValue = dataRange.elevation[0]
                 maxValue = dataRange.elevation[1]
                 label = 'Altitude (km)'
@@ -159,32 +144,10 @@ export default function ControlPanel({
         />
       </div>
 
-      <HeightFilterPanel
-        minHeight={heightFilter.min}
-        maxHeight={heightFilter.max}
-        absoluteMin={globalDataRange.elevation ? globalDataRange.elevation[0] : 0}
-        absoluteMax={globalDataRange.elevation ? globalDataRange.elevation[1] : 40}
-        onApply={(min, max) => onHeightFilterChange({ min, max })}
-        onReset={onResetHeightFilter}
-        enabled={heightFilter.enabled}
-        onToggleEnabled={() => onHeightFilterChange({ enabled: !heightFilter.enabled })}
-      />
+      {/* View mode removed - fixed to 2D only */}
 
-      <div className="control-group">
-        <label className="control-label">View Mode</label>
-        <button
-          className="control-button view-toggle"
-          onClick={() => {
-            const nextMode = viewMode === 'space' ? '2d' : 'space'
-            onViewModeChange(nextMode)
-          }}
-        >
-          {viewMode === 'space' ? '🗺️ 2D Map' : '🌍 Space View'}
-        </button>
-      </div>
-
-      {/* Ground Mode is only available in 2D view */}
-      {viewMode === '2d' && (
+      {/* Ground Mode */}
+      {(
         <div className="control-group">
           <label className="control-label">Ground View</label>
           <button

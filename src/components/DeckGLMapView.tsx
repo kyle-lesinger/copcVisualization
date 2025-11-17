@@ -1,4 +1,4 @@
-import { useEffect, useRef, forwardRef, useImperativeHandle, useState } from 'react'
+import { useEffect, useRef, forwardRef, useImperativeHandle, useState, useCallback } from 'react'
 import maplibregl from 'maplibre-gl'
 import { MapboxOverlay } from '@deck.gl/mapbox'
 import { ScatterplotLayer, LineLayer, IconLayer, PolygonLayer } from '@deck.gl/layers'
@@ -551,11 +551,23 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
           },
           layers: [
             {
+              id: 'background',
+              type: 'background',
+              paint: {
+                'background-color': '#000000'
+              }
+            },
+            {
               id: 'osm',
               type: 'raster',
               source: 'osm',
               minzoom: 0,
-              maxzoom: 19
+              maxzoom: 19,
+              paint: {
+                'raster-opacity': 0.3,
+                'raster-brightness-min': 0,
+                'raster-brightness-max': 0.3
+              }
             }
           ]
         },
@@ -744,22 +756,46 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
     }, [])
 
     // Get subsample rate based on zoom level - minimum 50% of points at all zooms
-    const getSubsampleRate = (zoom: number, groundModeActive: boolean): number => {
+    const getSubsampleRate = useCallback((zoom: number, groundModeActive: boolean, totalPoints: number): number => {
       // Always show all points in ground mode for maximum detail
       if (groundModeActive) return 1
 
-      // Show at least 50% of points at all zoom levels (subsample rate = 2 maximum)
-      // This ensures large datasets are still visible even when zoomed out
-      if (zoom < 9) return 2         // 50% of points (~2.2M points for large files)
-      return 1                        // All points at zoom 9+
-    }
+      // For standard mode: subsample based on zoom level AND dataset size
+      // Goal: Keep rendered points under ~500K for performance and avoid crashes
+      // Very large datasets (>10M points) need aggressive subsampling
+
+      if (totalPoints > 10_000_000) {
+        // VERY LARGE datasets (10M+ points) - aggressive subsampling for performance
+        // GPS time sorting ensures we still see the orbital track even with heavy subsampling
+        if (zoom < 2) return 100       // 1% of points (~350K) - global overview
+        if (zoom < 4) return 50        // 2% of points (~700K) - continental view
+        if (zoom < 6) return 25        // 4% of points (~1.4M) - regional view
+        if (zoom < 8) return 10        // 10% of points (~3.5M) - detailed view
+        if (zoom < 10) return 5        // 20% of points (~7M) - high detail
+        if (zoom < 12) return 2        // 50% of points (~17.5M) - very detailed
+        return 1                       // 100% of points at zoom 12+ - full detail
+      } else if (totalPoints > 5_000_000) {
+        // Large datasets (5M-10M points)
+        if (zoom < 5) return 10        // 10% of points
+        if (zoom < 7) return 5         // 20% of points
+        if (zoom < 9) return 2         // 50% of points
+        return 1                       // All points at zoom 9+
+      } else {
+        // Medium datasets (<5M points)
+        if (zoom < 7) return 2         // 50% of points
+        return 1                       // All points at zoom 7+
+      }
+    }, [])
 
     // Update deck.gl layers when data or settings change
     useEffect(() => {
       if (!deckOverlayRef.current || data.length === 0) return
 
-      // Get subsample rate based on current zoom level and ground mode
-      const subsampleRate = getSubsampleRate(currentZoom, isGroundModeActiveRef.current)
+      // Calculate total points in dataset first
+      const totalDatasetPoints = data.reduce((sum, dataset) => sum + dataset.positions.length / 3, 0)
+
+      // Get subsample rate based on current zoom level, ground mode, and dataset size
+      const subsampleRate = getSubsampleRate(currentZoom, isGroundModeActiveRef.current, totalDatasetPoints)
       const useAveraging = isGroundModeActiveRef.current ? false : currentZoom < 9 // No averaging in ground mode
       const neighborCount = 40 // Number of neighbors to average
 
@@ -858,8 +894,7 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
       const visiblePointCount = Math.floor(points.length * animationProgress)
       const visiblePoints = points.slice(0, visiblePointCount)
 
-      // Calculate total points in dataset for culling stats
-      const totalDatasetPoints = data.reduce((sum, dataset) => sum + dataset.positions.length / 3, 0)
+      // Calculate culling stats (totalDatasetPoints already calculated above)
       const cullingInfo = visibleBounds
         ? ` (frustum culled ${totalDatasetPoints.toLocaleString()} → ${points.length.toLocaleString()} points, ${((points.length / totalDatasetPoints) * 100).toFixed(1)}% visible)`
         : ''
@@ -871,6 +906,13 @@ const DeckGLMapView = forwardRef<DeckGLMapViewHandle, DeckGLMapViewProps>(
         console.log(`[DeckGLMapView]   Ground mode active: ${isGroundModeActiveRef.current}`)
         console.log(`[DeckGLMapView]   Frustum culling: ${isGroundModeActiveRef.current ? 'DISABLED (ground mode)' : 'not applicable'}`)
         console.log(`[DeckGLMapView]   Points rendered: ${points.length.toLocaleString()}`)
+
+        // Warn if dataset is extremely large
+        if (totalDatasetPoints > 10_000_000) {
+          console.warn(`[DeckGLMapView] ⚠️  VERY LARGE DATASET detected (${(totalDatasetPoints / 1_000_000).toFixed(1)}M points)`)
+          console.warn(`[DeckGLMapView] 🔍 Using aggressive subsampling (1:${subsampleRate}) to prevent browser crash`)
+          console.warn(`[DeckGLMapView] 💡 Zoom in to see more detail - subsample rate will decrease with zoom`)
+        }
       }
 
       console.log('[DeckGLMapView] Creating layer with', visiblePoints.length, '/', points.length, `points (${(animationProgress * 100).toFixed(1)}% progress)${cullingInfo}`)

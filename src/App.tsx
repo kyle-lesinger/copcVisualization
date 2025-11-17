@@ -1,32 +1,17 @@
 import { useState, useEffect, useCallback } from 'react'
 import PointCloudViewer from './components/PointCloudViewer'
-import FileSelector from './components/FileSelector'
+import FilterPanel from './components/FilterPanel'
 import ControlPanel from './components/ControlPanel'
 import ControlsInfo from './components/ControlsInfo'
 import DataInfo from './components/DataInfo'
 import { Colormap } from './utils/colormaps'
 import { LatLon } from './utils/aoiSelector'
+import { searchCalipsoFiles, FileSearchResult, getAvailableFileList } from './utils/fileSearch'
 import './App.css'
 
 export type ColorMode = 'elevation' | 'intensity' | 'classification'
-export type FileMode = 'single' | 'tiled'
 export type ViewMode = 'space' | '2d'
 export type { Colormap }
-
-// Available COPC files - served from public/output (symlinked)
-const SINGLE_FILES = [
-  '/output/CAL_LID_L1-Standard-V4-51.2023-06-30T16-44-43ZD.copc.laz',
-  '/output/CAL_LID_L1-Standard-V4-51.2023-06-30T17-37-28ZN.copc.laz',
-  '/output/CAL_LID_L1-Standard-V4-51.2023-06-30T18-23-08ZD.copc.laz',
-  '/output/CAL_LID_L1-Standard-V4-51.2023-06-30T19-15-53ZN.copc.laz',
-  '/output/CAL_LID_L1-Standard-V4-51.2023-06-30T20-01-33ZD.copc.laz',
-  '/output/CAL_LID_L1-Standard-V4-51.2023-06-30T20-54-18ZN.copc.laz',
-  '/output/CAL_LID_L1-Standard-V4-51.2023-06-30T21-39-53ZD.copc.laz'
-]
-
-const TILED_FILES = [
-  '/output/tiled/CAL_LID_L1-Standard-V4-51.2023-06-30T16-44-43ZD_tile_south.copc.laz'
-]
 
 export interface DataRange {
   elevation: [number, number] | null
@@ -39,13 +24,34 @@ export interface HeightFilter {
   max: number
 }
 
+export interface SpatialBoundsFilter {
+  enabled: boolean
+  minLon: number
+  maxLon: number
+  minLat: number
+  maxLat: number
+  minAlt: number
+  maxAlt: number
+}
+
+export interface DateRangeFilter {
+  enabled: boolean
+  startDate: string // ISO datetime string YYYY-MM-DDTHH:mm:ss
+  endDate: string
+}
+
+export type BandType = 'all' | 'day' | 'night'
+
 function App() {
-  const [fileMode, setFileMode] = useState<FileMode>('tiled')
-  const [selectedFiles, setSelectedFiles] = useState<string[]>(fileMode === 'single' ? [SINGLE_FILES[0]] : TILED_FILES)
+  // File management
+  const [selectedFiles, setSelectedFiles] = useState<string[]>([])
+  const [foundFiles, setFoundFiles] = useState<FileSearchResult | null>(null)
+  const [spatialFilterApplyCounter, setSpatialFilterApplyCounter] = useState(0)
+
   const [colorMode, setColorMode] = useState<ColorMode>('intensity')
   const [colormap, setColormap] = useState<Colormap>('plasma')
   const [pointSize, setPointSize] = useState(2.0)
-  const [viewMode, setViewMode] = useState<ViewMode>('space')
+  const [viewMode] = useState<ViewMode>('2d') // Fixed to 2D mode only
 
   // Global data range - never changes, represents full unfiltered data
   const [globalDataRange, setGlobalDataRange] = useState<DataRange>({
@@ -65,6 +71,27 @@ function App() {
     min: 0,
     max: 40
   })
+
+  // Spatial bounds filter state
+  const [spatialBoundsFilter, setSpatialBoundsFilter] = useState<SpatialBoundsFilter>({
+    enabled: false,
+    minLon: -180,
+    maxLon: 180,
+    minLat: -90,
+    maxLat: 90,
+    minAlt: 0,
+    maxAlt: 40
+  })
+
+  // Date range filter state
+  const [dateRangeFilter, setDateRangeFilter] = useState<DateRangeFilter>({
+    enabled: false,
+    startDate: '2023-06-30T16:00:00',
+    endDate: '2023-06-30T17:00:00'
+  })
+
+  // Band type filter state
+  const [selectedBand, setSelectedBand] = useState<BandType>('all')
 
   // AOI state
   const [aoiPolygon, setAoiPolygon] = useState<LatLon[] | null>(null)
@@ -86,16 +113,6 @@ function App() {
   // Ground mode state
   const [isGroundModeActive, setIsGroundModeActive] = useState(false)
   const [groundCameraPosition, setGroundCameraPosition] = useState<{ lat: number, lon: number } | null>(null)
-
-  const handleFileModeChange = (mode: FileMode) => {
-    setFileMode(mode)
-    // Update selected files based on mode
-    if (mode === 'single') {
-      setSelectedFiles([SINGLE_FILES[0]])
-    } else {
-      setSelectedFiles(TILED_FILES)
-    }
-  }
 
   const handleToggleDrawAOI = () => {
     setIsDrawingAOI(!isDrawingAOI)
@@ -137,39 +154,88 @@ function App() {
     setCurrentPosition({ lat, lon })
   }
 
+  // View mode is fixed to 2D - removed toggle functionality
   const handleViewModeChange = (mode: ViewMode) => {
-    // Clear AOI selection when switching between views
-    if (mode !== viewMode) {
-      console.log(`[App] Switching view mode from ${viewMode} to ${mode}, clearing AOI`)
-      handleClearAOI()
-
-      // Set colormap to jet and point size to 10 when switching to 2D mode
-      if (mode === '2d') {
-        console.log(`[App] Switching to 2D mode, setting colormap to jet and point size to 10`)
-        setColormap('jet')
-        setPointSize(10)
-      }
-
-      // Disable ground mode when switching to space view (ground mode only works in 2D)
-      if (mode === 'space' && isGroundModeActive) {
-        console.log(`[App] Switching to space view, disabling ground mode`)
-        setIsGroundModeActive(false)
-        setGroundCameraPosition(null)
-      }
-    }
-    setViewMode(mode)
+    // No-op: View mode is fixed to 2D
+    console.log('[App] View mode is fixed to 2D mode only')
   }
 
-  const handleHeightFilterChange = (updates: Partial<HeightFilter>) => {
-    setHeightFilter(prev => ({ ...prev, ...updates }))
+  const handleSpatialBoundsFilterChange = (updates: Partial<SpatialBoundsFilter>) => {
+    setSpatialBoundsFilter(prev => {
+      const newFilter = { ...prev, ...updates }
+
+      // Log when filter is enabled/disabled
+      if ('enabled' in updates && updates.enabled !== prev.enabled) {
+        if (updates.enabled) {
+          console.log('[App] ✅ Spatial bounds filter ENABLED (toggle ON)')
+          console.log('[App] ℹ️  Data will NOT load until you click "Apply Filter" button')
+          // Do NOT increment counter here - only on Apply Filter button
+        } else {
+          console.log('[App] ❌ Spatial bounds filter DISABLED')
+        }
+      }
+
+      // If filter values changed (Apply Filter button clicked), increment counter
+      // This happens when user clicks "Apply Filter" in the spatial bounds panel
+      const valuesChanged = ('minLon' in updates || 'maxLon' in updates ||
+                            'minLat' in updates || 'maxLat' in updates ||
+                            'minAlt' in updates || 'maxAlt' in updates)
+
+      if (valuesChanged && newFilter.enabled) {
+        console.log('[App] 🔄 Spatial bounds "Apply Filter" button clicked')
+        // Increment apply counter to trigger reload with new bounds
+        setSpatialFilterApplyCounter(c => c + 1)
+      }
+
+      return newFilter
+    })
   }
 
-  const handleResetHeightFilter = () => {
-    setHeightFilter(prev => ({
+  const handleResetSpatialBoundsFilter = () => {
+    setSpatialBoundsFilter(prev => ({
       ...prev,
-      min: globalDataRange.elevation ? globalDataRange.elevation[0] : 0,
-      max: globalDataRange.elevation ? globalDataRange.elevation[1] : 40
+      minLon: globalDataRange.elevation ? -180 : -180,
+      maxLon: globalDataRange.elevation ? 180 : 180,
+      minLat: globalDataRange.elevation ? -90 : -90,
+      maxLat: globalDataRange.elevation ? 90 : 90,
+      minAlt: globalDataRange.elevation ? globalDataRange.elevation[0] : 0,
+      maxAlt: globalDataRange.elevation ? globalDataRange.elevation[1] : 40
     }))
+  }
+
+  const handleDateRangeFilterChange = (updates: Partial<DateRangeFilter>) => {
+    setDateRangeFilter(prev => {
+      const newFilter = { ...prev, ...updates }
+
+      // Log when filter is enabled/disabled
+      if ('enabled' in updates && updates.enabled !== prev.enabled) {
+        if (updates.enabled) {
+          console.log('[App] ✅ Date range filter ENABLED')
+          console.log(`[App] 📅 Date range: ${prev.startDate} to ${prev.endDate}`)
+        } else {
+          console.log('[App] ❌ Date range filter DISABLED')
+        }
+      }
+
+      return newFilter
+    })
+  }
+
+  const handleResetDateRangeFilter = () => {
+    setDateRangeFilter({
+      enabled: false,
+      startDate: '2023-06-30T16:00:00',
+      endDate: '2023-06-30T17:00:00'
+    })
+  }
+
+  const handleBandChange = (band: BandType) => {
+    console.log(`[App] 🔄 Band type changed to: ${band}`)
+    if (dateRangeFilter.enabled) {
+      console.log(`[App] 🔍 Will search for files matching band "${band}" and date range`)
+      console.log(`[App] 📅 Date range: ${dateRangeFilter.startDate} to ${dateRangeFilter.endDate}`)
+    }
+    setSelectedBand(band)
   }
 
   const handleToggleGroundMode = () => {
@@ -182,11 +248,6 @@ function App() {
 
   const handleGroundCameraPositionSet = (lat: number, lon: number) => {
     setGroundCameraPosition({ lat, lon })
-  }
-
-  const handleExitGroundMode = () => {
-    setIsGroundModeActive(false)
-    setGroundCameraPosition(null)
   }
 
   const handleGlobalDataRangeUpdate = useCallback((range: DataRange) => {
@@ -206,6 +267,91 @@ function App() {
       setHeightFilterInitialized(true)
     }
   }, [globalDataRange.elevation, heightFilterInitialized])
+
+  // Automatic file search when date range or band type changes
+  useEffect(() => {
+    // Only search if date range filter is enabled
+    if (!dateRangeFilter.enabled) {
+      console.log('[App] ℹ️  Date range filter disabled - skipping file search')
+      setFoundFiles(null)
+      setSelectedFiles([])
+      return
+    }
+
+    // Perform async file search
+    const performSearch = async () => {
+      console.log('[App] 🔍 Triggering automatic file search...')
+      console.log(`[App] Band: ${selectedBand}, Date range: ${dateRangeFilter.startDate} to ${dateRangeFilter.endDate}`)
+
+      try {
+        // Search for files using the file search utility
+        // Uses the configured file list from fileSearch.ts
+        // In production, replace with API endpoint or S3 listing
+        const result = await searchCalipsoFiles(
+          selectedBand,
+          dateRangeFilter.startDate,
+          dateRangeFilter.endDate,
+          {
+            fileList: getAvailableFileList() // Update file list in fileSearch.ts
+          }
+        )
+
+        setFoundFiles(result)
+
+        // Automatically select found files (they will be loaded when spatial filter is applied)
+        if (result.files.length > 0) {
+          console.log(`[App] ✅ ${result.files.length} files ready for loading`)
+          console.log(`[App] 📋 Files stored and ready for spatial filtering`)
+          // Don't load files yet - wait for spatial bounds to be applied
+        }
+
+      } catch (error) {
+        console.error('[App] ❌ File search failed:', error)
+        setFoundFiles(null)
+      }
+    }
+
+    performSearch()
+  }, [selectedBand, dateRangeFilter.enabled, dateRangeFilter.startDate, dateRangeFilter.endDate])
+
+  // Load files ONLY when spatial bounds filter is explicitly applied (counter increments)
+  // Clear files when spatial bounds filter is disabled
+  useEffect(() => {
+    // If spatial bounds filter is disabled, clear files
+    if (!spatialBoundsFilter.enabled) {
+      if (selectedFiles.length > 0) {
+        console.log('[App] 🗑️  Spatial bounds filter disabled - clearing data')
+        setSelectedFiles([])
+      }
+      return
+    }
+
+    // Only proceed if counter > 0 (meaning filter was explicitly applied)
+    if (spatialFilterApplyCounter === 0) {
+      return
+    }
+
+    // If enabled, check if we have files to load
+    if (!foundFiles || foundFiles.files.length === 0) {
+      console.log('[App] ⚠️  Spatial bounds filter applied but no files found to load')
+      setSelectedFiles([])
+      return
+    }
+
+    // Clear old data and load new files with spatial filtering
+    console.log('[App] 🔄 Spatial bounds filter APPLIED - loading data')
+    console.log('[App] 🗑️  Clearing old data first')
+    console.log('[App] 🗺️  Loading files with spatial bounds:')
+    console.log(`  • Lon: ${spatialBoundsFilter.minLon.toFixed(2)}° to ${spatialBoundsFilter.maxLon.toFixed(2)}°`)
+    console.log(`  • Lat: ${spatialBoundsFilter.minLat.toFixed(2)}° to ${spatialBoundsFilter.maxLat.toFixed(2)}°`)
+    console.log(`  • Alt: ${spatialBoundsFilter.minAlt.toFixed(2)} to ${spatialBoundsFilter.maxAlt.toFixed(2)} km`)
+    console.log(`[App] 📂 Loading ${foundFiles.files.length} file(s)`)
+
+    // Create a new array reference to force React to recognize the change
+    // This ensures PointCloudViewer reloads even if the file list is the same
+    setSelectedFiles([...foundFiles.files])
+
+  }, [spatialFilterApplyCounter, spatialBoundsFilter.enabled, foundFiles, selectedFiles.length, spatialBoundsFilter.minLon, spatialBoundsFilter.maxLon, spatialBoundsFilter.minLat, spatialBoundsFilter.maxLat, spatialBoundsFilter.minAlt, spatialBoundsFilter.maxAlt])
 
   return (
     <div className="app">
@@ -228,18 +374,22 @@ function App() {
         onCurrentGpsTimeUpdate={handleCurrentGpsTimeUpdate}
         onCurrentPositionUpdate={handleCurrentPositionUpdate}
         heightFilter={heightFilter}
+        spatialBoundsFilter={spatialBoundsFilter}
         isGroundModeActive={isGroundModeActive}
         groundCameraPosition={groundCameraPosition}
         onGroundCameraPositionSet={handleGroundCameraPositionSet}
       />
 
-      <FileSelector
-        fileMode={fileMode}
-        onFileModeChange={handleFileModeChange}
-        singleFiles={SINGLE_FILES}
-        tiledFiles={TILED_FILES}
-        selectedFiles={selectedFiles}
-        onSelectionChange={setSelectedFiles}
+      <FilterPanel
+        selectedBand={selectedBand}
+        onBandChange={handleBandChange}
+        dateRangeFilter={dateRangeFilter}
+        onDateRangeFilterChange={handleDateRangeFilterChange}
+        onResetDateRangeFilter={handleResetDateRangeFilter}
+        spatialBoundsFilter={spatialBoundsFilter}
+        onSpatialBoundsFilterChange={handleSpatialBoundsFilterChange}
+        onResetSpatialBoundsFilter={handleResetSpatialBoundsFilter}
+        globalDataRange={globalDataRange}
       />
 
       <ControlPanel
@@ -252,10 +402,6 @@ function App() {
         viewMode={viewMode}
         onViewModeChange={handleViewModeChange}
         dataRange={dataRange}
-        globalDataRange={globalDataRange}
-        heightFilter={heightFilter}
-        onHeightFilterChange={handleHeightFilterChange}
-        onResetHeightFilter={handleResetHeightFilter}
         isDrawingAOI={isDrawingAOI}
         onToggleDrawAOI={handleToggleDrawAOI}
         onClearAOI={handleClearAOI}
